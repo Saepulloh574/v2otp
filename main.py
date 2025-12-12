@@ -94,6 +94,11 @@ def format_otp_message(otp_data):
     range_text = otp_data.get('range', 'N/A')
     timestamp = otp_data.get('timestamp', datetime.now().strftime('%H:%M:%S'))
     full_message = otp_data.get('raw_message', 'N/A')
+    
+    # Melakukan escaping HTML pada pesan penuh agar Telegram tidak error membaca tag HTML
+    # Ini harus dipertahankan untuk keamanan, karena pesan bisa mengandung '<' atau '>'
+    full_message_escaped = full_message.replace('<', '&lt;').replace('>', '&gt;') 
+    
     return f"""🔐 <b>New OTP Received</b>
 
 🏷️ Range: <b>{range_text}</b>
@@ -103,21 +108,7 @@ def format_otp_message(otp_data):
 🔢 OTP: <code>{otp}</code>
 
 FULL MESSAGES:
-<blockquote>{full_message}</blockquote>"""
-
-# Fungsi ini tidak lagi digunakan karena pengiriman selalu satu per satu
-def format_multiple_otps(otp_list):
-    if len(otp_list) == 1: return format_otp_message(otp_list[0])
-    header = f"🔐 <b>{len(otp_list)} New OTPs Received</b>\n\n"
-    items = []
-    for i, otp_data in enumerate(otp_list, 1):
-        otp = otp_data['otp']
-        phone = otp_data['phone']
-        masked_phone = mask_phone_number(phone, visible_start=4, visible_end=4)
-        service = otp_data['service']
-        range_text = otp_data.get('range', 'N/A')
-        items.append(f"<b>{i}.</b> <code>{otp}</code> | {service} | <code>{masked_phone}</code> | {range_text}")
-    return header + "\n".join(items) + "\n\n<i>Tap any OTP to copy it!</i>"
+<blockquote>{full_message_escaped}</blockquote>"""
 
 def extract_otp_from_text(text):
     """Fungsi ekstraksi OTP yang fleksibel (dipertahankan untuk keamanan)."""
@@ -183,7 +174,6 @@ class OTPFilter:
         for k in dead: del self.cache[k]
         self._save()
         
-    # Kunci unik: OTP dan Nomor Telepon
     def key(self, d): return f"{d['otp']}_{d['phone']}" 
     
     def is_dup(self, d):
@@ -191,7 +181,6 @@ class OTPFilter:
         return self.key(d) in self.cache
         
     def add(self, d):
-        # Menggunakan datetime.now().isoformat() untuk timestamp yang unik
         self.cache[self.key(d)] = {'timestamp':datetime.now().isoformat()} 
         self._save()
         
@@ -261,8 +250,6 @@ class SMSMonitor:
         self.page = None
 
     async def initialize(self):
-        # PASTIKAN ANDA SUDAH MENJALANKAN CHROME DENGAN ARGUMEN INI DI RDP:
-        # chrome.exe --remote-debugging-port=9222
         self.browser = await connect(browserURL="http://127.0.0.1:9222")
         pages = await self.browser.pages()
         page = None
@@ -283,29 +270,40 @@ class SMSMonitor:
         soup = BeautifulSoup(html, "html.parser")
         messages = []
 
-        # Target semua baris tabel
         rows = soup.find_all("tr")
 
         for r in rows:
-            # 1. Cek apakah baris memiliki OTP (hanya baris sukses)
             otp_badge_span = r.find("span", class_="otp-badge")
             
             if otp_badge_span:
-                
-                # --- Ekstraksi Data ---
                 
                 # A. Phone Number
                 phone_span = r.find("span", class_="phone-number")
                 phone = clean_phone_number(phone_span.get_text(strip=True) if phone_span else "N/A")
                 
-                # B. Raw Message (dari data-sms attribute)
+                # B. Raw Message (Original & Cleaned)
                 copy_icon = otp_badge_span.find("i", class_="copy-icon")
-                raw_message = copy_icon.get('data-sms', 'N/A') if copy_icon else otp_badge_span.get_text(strip=True)
+                raw_message_original = copy_icon.get('data-sms', 'N/A') if copy_icon else otp_badge_span.get_text(strip=True)
                 
-                # C. OTP (diekstrak dari raw_message atau teks badge yang bersih)
-                otp_raw_text = otp_badge_span.get_text(strip=True, separator=' ')
-                otp = extract_otp_from_text(otp_raw_text)
+                # 💥 LOGIKA PENGAMBILAN PESAN PENUH MENTAH 💥
+                # Tujuannya: Ambil semua teks setelah tanda ':' (Service Name)
+                if ':' in raw_message_original and raw_message_original != 'N/A':
+                    # Ambil semua teks setelah tanda titik dua pertama.
+                    # HANYA gunakan .strip() untuk menghilangkan spasi di awal.
+                    raw_message_clean = raw_message_original.split(':', 1)[1].strip()
+                else:
+                    # Jika tidak ada ':' (Service Name), gunakan pesan asli
+                    raw_message_clean = raw_message_original
                 
+                
+                # C. OTP (Ambil dari teks badge yang jelas, fallback ke regex jika gagal)
+                otp_raw_text_parts = [t.strip() for t in otp_badge_span.contents if t.name is None and t.strip()]
+                otp = otp_raw_text_parts[0] if otp_raw_text_parts else None 
+                
+                if not (otp and otp.isdigit()):
+                    otp_full_text = otp_badge_span.get_text(strip=True, separator=' ')
+                    otp = extract_otp_from_text(otp_full_text)
+                    
                 # D. Range/Country
                 tds = r.find_all("td")
                 range_text = "N/A"
@@ -314,8 +312,8 @@ class SMSMonitor:
                     if range_badge:
                         range_text = range_badge.get_text(strip=True)
                 
-                # E. Service (dari Raw Message/data-sms)
-                service_raw = raw_message.split(':', 1)[0] if raw_message != 'N/A' and ':' in raw_message else 'Unknown'
+                # E. Service 
+                service_raw = raw_message_original.split(':', 1)[0] if raw_message_original != 'N/A' and ':' in raw_message_original else 'Unknown'
                 service = clean_service_name(service_raw)
                 
                 # --- Simpan Hasil ---
@@ -326,7 +324,7 @@ class SMSMonitor:
                         "service": service,
                         "range": range_text,
                         "timestamp": datetime.now().strftime("%H:%M:%S"),
-                        "raw_message": raw_message
+                        "raw_message": raw_message_clean # Menggunakan pesan yang sudah bersih minimalis
                     })
         return messages
     
@@ -449,7 +447,6 @@ async def monitor_sms_loop():
                 if new:
                     print(f"✅ Found {len(new)} new OTP(s). Sending to Telegram one by one with 2-second delay...")
                     
-                    # LOGIKA PENGIRIMAN SATU PER SATU DENGAN JEDA 2 DETIK
                     for i, otp_data in enumerate(new):
                         message_text = format_otp_message(otp_data)
                         print(f"   -> Sending OTP {i+1}/{len(new)}: {otp_data['otp']} for {otp_data['phone']}")
@@ -457,10 +454,8 @@ async def monitor_sms_loop():
                         send_tg(message_text, with_inline_keyboard=True)
                         total_sent += 1
                         
-                        # Jeda yang diminta: 2 detik
                         await asyncio.sleep(2) 
                     
-                    # Refresh hanya dilakukan di sini (setelah semua pesan terkirim)
                     if ADMIN_ID is not None:
                         print("⚙️ Executing automatic refresh and screenshot to admin...")
                         await monitor.refresh_and_screenshot(admin_chat_id=ADMIN_ID)
@@ -477,7 +472,6 @@ async def monitor_sms_loop():
         stats = update_global_status()
         check_cmd(stats)
         
-        # Jeda loop utama (5 detik)
         await asyncio.sleep(5) 
 
 # ================= FLASK WEB SERVER UNTUK API DAN DASHBOARD =================
@@ -497,7 +491,6 @@ def get_status_json():
     update_global_status() 
     return jsonify(BOT_STATUS)
 
-# ROUTE INI DIUBAH MENJADI FUNGSI REFRESH & SCREENSHOT SAJA
 @app.route('/manual-check', methods=['GET'])
 def manual_check():
     """Memanggil refresh_and_screenshot di loop asinkron (dipicu dari Dashboard)."""
@@ -506,7 +499,6 @@ def manual_check():
         return jsonify({"message": "Error: Asyncio loop not initialized."}), 500
         
     try:
-        # Panggil refresh_and_screenshot
         asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(admin_chat_id=ADMIN_ID), GLOBAL_ASYNC_LOOP)
         return jsonify({"message": "Halaman MNIT Network Refresh & Screenshot sedang dikirim ke Admin Telegram."})
     except RuntimeError as e:
@@ -537,13 +529,14 @@ def clear_otp_cache_route():
 @app.route('/test-message', methods=['GET'])
 def test_message_route():
     """Mengirim pesan tes ke Telegram menggunakan format OTP."""
+    # Pesan Tes yang meniru format terbersih
     test_data = {
         "otp": "999999",
         "phone": "+2250150086627",
         "service": "MNIT Test",
         "range": "Ivory Coast",
         "timestamp": datetime.now().strftime("%H:%M:%S"),
-        "raw_message": "FACEBOOK: FB-999999 adalah kode konfirmasi Facebook anda (Pesan Tes)."
+        "raw_message": "FB-999999 adalah kode konfirmasi Facebook anda (Pesan Tes) Penuh. Jangan menggunakan kode ini."
     }
     
     test_msg = format_otp_message(test_data).replace("🔐 <b>New OTP Received</b>", "🧪 <b>TEST MESSAGE FROM DASHBOARD</b>")
