@@ -11,7 +11,7 @@ from pyppeteer import connect
 # ================= Configuration =================
 # Pastikan menggunakan token Bot Pelayanan User
 # 💥 TOKEN DIMASUKKAN LANGSUNG SESUAI PERMINTAAN
-BOT_TOKEN = "8244546257:AAGu3vwXPZbfcJznfW9WwhHOkdumyKM079g" 
+BOT_TOKEN = "8047851913:AAFGXlRL_e7JcLEMtOqUuuNd_46ZmIoGJN8" 
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 
 # Ganti dengan ID Admin Anda (tetap ambil dari .env jika ada, atau default 0)
