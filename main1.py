@@ -10,7 +10,6 @@ import time
 from dotenv import load_dotenv
 import socket
 from threading import Thread, current_thread
-# import html # Tidak diperlukan lagi, menggunakan .replace() manual yang aman
 
 # --- Import Flask ---
 from flask import Flask, jsonify, render_template
@@ -40,8 +39,13 @@ TELEGRAM_ADMIN_LINK = "https://t.me/Imr1d"     # Ganti dengan link admin Anda
 
 # In-Memory Cache untuk OTP dan User Request
 otp_filter = None # Akan diinisialisasi nanti
+
+# --- Variabel Persistensi User ---
+USER_FILE = 'user.json' 
+USER_ALLOWED_IDS = set() # Akan dimuat dari user.json
+# ----------------------------------
+
 USER_REQUEST_CACHE = {} # { Nomor Prefix Request: User ID Telegram }
-USER_ALLOWED_IDS = set() # { User ID Telegram }
 
 # Global State
 GLOBAL_ASYNC_LOOP = None
@@ -114,9 +118,7 @@ def format_otp_message(otp_data):
     range_text = otp_data.get('range', 'N/A')
     full_message = otp_data.get('raw_message', 'N/A')
     
-    # 💥 PERBAIKAN ESCAPING HTML KHUSUS: Mengatasi error Bad Request 400
-    # Escape ampersand (&) agar HTML entities seperti &lt; (jika ada) tidak rusak.
-    # Lalu escape < dan >.
+    # PERBAIKAN ESCAPING HTML: Escape &, <, dan >
     full_message_escaped = full_message.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
     
     return f"""🔐 <b>New OTP Received</b>
@@ -160,8 +162,27 @@ def get_status_message(stats):
 
 <i>Bot is running</i>"""
 
+# --- Fungsi Persistensi User ---
+def load_users():
+    if os.path.exists(USER_FILE):
+        try:
+            with open(USER_FILE, 'r') as f:
+                return set(json.load(f))
+        except (json.JSONDecodeError, FileNotFoundError):
+            return set()
+    return set()
+
+def save_users(user_set):
+    try:
+        with open(USER_FILE, 'w') as f:
+            json.dump(list(user_set), f, indent=2)
+    except Exception as e:
+        print(f"❌ Error saving {USER_FILE}: {e}")
+# ----------------------------------------
+
+
 class OTPFilter:
-    # 💥 PERBAIKAN SINTAKSIS: Mengatasi SyntaxError (expire=3=30)
+    # PERBAIKAN SINTAKSIS: expire=30
     def __init__(self, file='otp_cache.json', expire=30):
         self.file = file
         self.expire = expire
@@ -264,7 +285,7 @@ def update_global_status():
     return BOT_STATUS
 
 
-# ================= User Bot Class (NEW) =================
+# ================= User Bot Class =================
 
 class UserBot:
     def __init__(self, token):
@@ -298,12 +319,29 @@ class UserBot:
             if not chat_id: continue 
 
             if text == "/start":
-                USER_ALLOWED_IDS.add(user_id)
-                send_tg_user(
-                    f"Halo, ID Anda ({user_id}) telah disimpan. Silakan kirimkan format nomor telepon yang ingin Anda dapatkan.", 
-                    chat_id
-                )
-                send_tg_monitor(f"👤 **New User Registered**: ID `{user_id}`", with_inline_keyboard=False)
+                if user_id not in USER_ALLOWED_IDS:
+                    USER_ALLOWED_IDS.add(user_id)
+                    save_users(USER_ALLOWED_IDS) # SIMPAN ID USER BARU
+                    
+                    # FEEDBACK USER BARU
+                    welcome_message = (
+                        f"✅ Selamat datang! ID Anda (`{user_id}`) telah terdaftar dan tersimpan.\n\n"
+                        f"Untuk memulai, kirimkan **prefix nomor telepon** yang ingin Anda dapatkan "
+                        f"(minimal 6 digit).\n\n"
+                        f"Contoh:\n"
+                        f"• `+2246543XXX`\n"
+                        f"• `85712345XX`"
+                    )
+                    send_tg_user(welcome_message, chat_id)
+                    send_tg_monitor(f"👤 **New User Registered**: ID `{user_id}`", with_inline_keyboard=False)
+                else:
+                    # FEEDBACK USER LAMA
+                    welcome_message_back = (
+                        f"👋 Halo kembali! ID Anda (`{user_id}`) sudah terdaftar.\n\n"
+                        f"Silakan kirimkan **prefix nomor telepon** yang ingin Anda dapatkan.\n"
+                        f"Contoh: `+2246543XXX`"
+                    )
+                    send_tg_user(welcome_message_back, chat_id)
             
             elif user_id in USER_ALLOWED_IDS and (text.startswith('+') or text.isdigit()):
                 input_number = clean_phone_number(text)
@@ -332,7 +370,7 @@ class UserBot:
                     send_tg_user("Mohon ketik /start terlebih dahulu.", chat_id)
 
 
-# ================= Scraper & Monitor Class (MODIFIED) =================
+# ================= Scraper & Monitor Class =================
 
 class SMSMonitor:
     def __init__(self, url=URL):
@@ -399,8 +437,6 @@ class SMSMonitor:
         messages = []
 
         # === Logika Baru: Memproses Status Pending (Untuk Notifikasi User) ===
-        
-        # Cari baris dengan status 'pending'
         pending_rows = soup.find_all("span", class_="status-pending")
         
         for p_span in pending_rows:
@@ -412,8 +448,7 @@ class SMSMonitor:
             
             if phone:
                 # Cek apakah nomor ini diminta oleh user
-                for prefix, user_id in list(USER_REQUEST_CACHE.items()): # Gunakan list() untuk iterasi aman
-                    # Mencocokkan nomor pending dengan prefix yang diminta user (misal: user minta 2246543XXX, nomor pending adalah +224654312345)
+                for prefix, user_id in list(USER_REQUEST_CACHE.items()): 
                     if phone.startswith(prefix) or phone.startswith(prefix.replace('+', '')):
                         
                         # Kirim notifikasi ke user!
@@ -423,7 +458,7 @@ class SMSMonitor:
                         
                         print(f"-> NOTIFY PENDING: User {user_id} notified about pending number: {phone}")
                         
-                        # Hapus dari cache USER_REQUEST_CACHE karena status pending sudah dilaporkan
+                        # Hapus dari cache USER_REQUEST_CACHE 
                         del USER_REQUEST_CACHE[prefix]
                         break 
         
@@ -444,7 +479,7 @@ class SMSMonitor:
                 copy_icon = otp_badge_span.find("i", class_="copy-icon")
                 raw_message_original = copy_icon.get('data-sms', 'N/A') if copy_icon else otp_badge_span.get_text(strip=True)
                 
-                # LOGIKA PENGAMBILAN PESAN PENUH MENTAH (Setelah tanda titik dua pertama)
+                # LOGIKA PENGAMBILAN PESAN PENUH MENTAH 
                 if ':' in raw_message_original and raw_message_original != 'N/A':
                     raw_message_clean = raw_message_original.split(':', 1)[1].strip()
                 else:
@@ -564,7 +599,7 @@ async def monitor_sms_loop():
     while True:
         try:
             if BOT_STATUS["monitoring_active"]:
-                msgs = await monitor.fetch_sms() # Ini juga memicu notif pending
+                msgs = await monitor.fetch_sms() 
                 new = otp_filter.filter(msgs)
 
                 if new:
@@ -666,7 +701,7 @@ def run_flask():
     port = int(os.environ.get('PORT', 5000))
     
     global GLOBAL_ASYNC_LOOP
-    # Pastikan loop diatur untuk thread Flask agar bisa menggunakan asyncio.run_coroutine_threadsafe
+    # Pastikan loop diatur untuk thread Flask 
     if GLOBAL_ASYNC_LOOP and not asyncio._get_running_loop():
         asyncio.set_event_loop(GLOBAL_ASYNC_LOOP) 
         print(f"✅ Async loop successfully set for Flask thread: {current_thread().name}")
@@ -683,6 +718,10 @@ if __name__ == "__main__":
         
         otp_filter = OTPFilter() # Inisialisasi Filter
         
+        # Muat user yang sudah terdaftar dari file
+        USER_ALLOWED_IDS = load_users()
+        print(f"✅ Loaded {len(USER_ALLOWED_IDS)} authorized users from {USER_FILE}.")
+
         try:
             loop = asyncio.get_event_loop()
         except RuntimeError:
