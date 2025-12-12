@@ -10,6 +10,7 @@ import time
 from dotenv import load_dotenv
 import socket
 from threading import Thread, current_thread
+# import html # Tidak diperlukan lagi, menggunakan .replace() manual yang aman
 
 # --- Import Flask ---
 from flask import Flask, jsonify, render_template
@@ -113,8 +114,10 @@ def format_otp_message(otp_data):
     range_text = otp_data.get('range', 'N/A')
     full_message = otp_data.get('raw_message', 'N/A')
     
-    # Melakukan escaping HTML pada pesan penuh
-    full_message_escaped = full_message.replace('<', '&lt;').replace('>', '&gt;') 
+    # 💥 PERBAIKAN ESCAPING HTML KHUSUS: Mengatasi error Bad Request 400
+    # Escape ampersand (&) agar HTML entities seperti &lt; (jika ada) tidak rusak.
+    # Lalu escape < dan >.
+    full_message_escaped = full_message.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
     
     return f"""🔐 <b>New OTP Received</b>
 
@@ -158,7 +161,8 @@ def get_status_message(stats):
 <i>Bot is running</i>"""
 
 class OTPFilter:
-    def __init__(self, file='otp_cache.json', expire=3=30):
+    # 💥 PERBAIKAN SINTAKSIS: Mengatasi SyntaxError (expire=3=30)
+    def __init__(self, file='otp_cache.json', expire=30):
         self.file = file
         self.expire = expire
         self.cache = self._load()
@@ -394,7 +398,7 @@ class SMSMonitor:
         soup = BeautifulSoup(html, "html.parser")
         messages = []
 
-        # === Logika Baru: Memproses Status Pending ===
+        # === Logika Baru: Memproses Status Pending (Untuk Notifikasi User) ===
         
         # Cari baris dengan status 'pending'
         pending_rows = soup.find_all("span", class_="status-pending")
@@ -409,6 +413,7 @@ class SMSMonitor:
             if phone:
                 # Cek apakah nomor ini diminta oleh user
                 for prefix, user_id in list(USER_REQUEST_CACHE.items()): # Gunakan list() untuk iterasi aman
+                    # Mencocokkan nomor pending dengan prefix yang diminta user (misal: user minta 2246543XXX, nomor pending adalah +224654312345)
                     if phone.startswith(prefix) or phone.startswith(prefix.replace('+', '')):
                         
                         # Kirim notifikasi ke user!
@@ -418,7 +423,7 @@ class SMSMonitor:
                         
                         print(f"-> NOTIFY PENDING: User {user_id} notified about pending number: {phone}")
                         
-                        # Hapus dari cache USER_REQUEST_CACHE
+                        # Hapus dari cache USER_REQUEST_CACHE karena status pending sudah dilaporkan
                         del USER_REQUEST_CACHE[prefix]
                         break 
         
@@ -439,7 +444,7 @@ class SMSMonitor:
                 copy_icon = otp_badge_span.find("i", class_="copy-icon")
                 raw_message_original = copy_icon.get('data-sms', 'N/A') if copy_icon else otp_badge_span.get_text(strip=True)
                 
-                # LOGIKA PENGAMBILAN PESAN PENUH MENTAH (Sesuai permintaan terakhir)
+                # LOGIKA PENGAMBILAN PESAN PENUH MENTAH (Setelah tanda titik dua pertama)
                 if ':' in raw_message_original and raw_message_original != 'N/A':
                     raw_message_clean = raw_message_original.split(':', 1)[1].strip()
                 else:
@@ -478,8 +483,25 @@ class SMSMonitor:
         return messages
     
     async def refresh_and_screenshot(self, admin_chat_id): 
-        # ... (Sama seperti sebelumnya)
-        pass
+        screenshot_filename = f"screenshot_{int(time.time())}.png"
+        try:
+            if not self.page: await self.initialize()
+            print("🔄 Performing page refresh...")
+            await self.page.reload({'waitUntil': 'networkidle0'}) 
+            print(f"📸 Taking screenshot: {screenshot_filename}")
+            await self.page.screenshot({'path': screenshot_filename, 'fullPage': True})
+            print("📤 Sending screenshot to Admin Telegram...")
+            caption = f"✅ Page Refreshed successfully at {datetime.now().strftime('%H:%M:%S')}\n\n<i>Pesan OTP di halaman telah dihapus.</i>"
+            success = send_photo_tg_monitor(screenshot_filename, caption, target_chat_id=admin_chat_id)
+            return success
+        except Exception as e:
+            print(f"❌ Error during refresh/screenshot: {e}")
+            send_tg_monitor(f"⚠️ **Error Refresh/Screenshot**: `{e.__class__.__name__}: {e}`", target_chat_id=admin_chat_id)
+            return False
+        finally:
+            if os.path.exists(screenshot_filename):
+                os.remove(screenshot_filename)
+                print(f"🗑️ Cleaned up {screenshot_filename}")
 
 monitor = SMSMonitor()
 
@@ -489,8 +511,40 @@ def check_cmd(stats):
     global LAST_ID_MONITOR
     if ADMIN_ID is None: return
 
-    # ... (Logika check_cmd lama menggunakan LAST_ID_MONITOR dan BOT_MONITOR_TOKEN)
-    pass
+    try:
+        upd = requests.get(
+            f"https://api.telegram.org/bot{BOT_MONITOR_TOKEN}/getUpdates?offset={LAST_ID_MONITOR+1}",
+            timeout=15  
+        ).json()
+
+        for u in upd.get("result",[]):
+            LAST_ID_MONITOR = u["update_id"]
+            msg = u.get("message",{})
+            text = msg.get("text","")
+            user_id = msg.get("from", {}).get("id")
+            chat_id = msg.get("chat", {}).get("id")
+
+            if user_id == ADMIN_ID:
+                if text == "/status":
+                    requests.post(
+                        f"https://api.telegram.org/bot{BOT_MONITOR_TOKEN}/sendMessage",
+                        data={'chat_id': chat_id, 'text': get_status_message(stats), 'parse_mode': 'HTML'}
+                    )
+                elif text == "/refresh":
+                    send_tg_monitor("⏳ Executing page refresh and screenshot...", with_inline_keyboard=False, target_chat_id=chat_id)
+                    if GLOBAL_ASYNC_LOOP:
+                        asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(admin_chat_id=chat_id), GLOBAL_ASYNC_LOOP)
+                    else:
+                        send_tg_monitor("❌ Loop error: Global loop not set.", target_chat_id=chat_id)
+                elif text == "/clearcache":
+                    otp_filter.cache = {}
+                    otp_filter._save()
+                    send_tg_monitor(f"✅ OTP Cache cleared. New size: {len(otp_filter.cache)}.", target_chat_id=chat_id)
+
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Error during getUpdates (Monitor Bot): {e}")
+    except Exception as e:
+        print(f"❌ Unknown Error in check_cmd: {e}")
 
 
 async def monitor_sms_loop():
@@ -500,8 +554,9 @@ async def monitor_sms_loop():
     try:
         await monitor.initialize()
     except Exception as e:
-        # ... (Fatal error handling lama)
-        pass
+        print(f"FATAL ERROR: Failed to initialize SMSMonitor. {e}")
+        send_tg_monitor("🚨 **FATAL ERROR**: Gagal terhubung ke Chrome/Pyppeteer. Pastikan Chrome berjalan dengan `--remote-debugging-port=9222`.")
+        BOT_STATUS["status"] = "FATAL ERROR"
         return 
 
     BOT_STATUS["monitoring_active"] = True
@@ -520,14 +575,13 @@ async def monitor_sms_loop():
                         send_tg_monitor(format_otp_message(otp_data), with_inline_keyboard=True)
                         total_sent += 1
                         
-                        # Cek apakah OTP ini diminta user (opsional: bisa dikirim ke user)
-                        # Anda bisa menambahkan logika di sini untuk mencocokkan nomor OTP dengan User ID jika diperlukan.
-                        
                         await asyncio.sleep(2) 
                     
                     if ADMIN_ID is not None:
-                        # ... (Automatic refresh/screenshot lama)
-                        pass
+                        print("⚙️ Executing automatic refresh and screenshot to admin...")
+                        await monitor.refresh_and_screenshot(admin_chat_id=ADMIN_ID)
+                    else:
+                        print("⚠️ WARNING: ADMIN_ID not set. Skipping automatic refresh/screenshot.")
             else:
                 print("⏸️ Monitoring paused.")
 
@@ -536,26 +590,94 @@ async def monitor_sms_loop():
             print(error_message)
 
         stats = update_global_status()
-        # Perlu dijalankan di Thread karena check_cmd menggunakan requests sinkronus
+        # Jalankan check_cmd di thread karena menggunakan requests sinkronus
         Thread(target=check_cmd, args=(stats,)).start() 
         
         await asyncio.sleep(5) 
 
 # ================= FLASK WEB SERVER =================
-# ... (Semua route Flask tetap sama, pastikan mereka menggunakan fungsi send_tg_monitor)
-# ...
+
+app = Flask(__name__, template_folder='templates')
+
+@app.route('/', methods=['GET'])
+def index():
+    return render_template('dashboard.html')
+
+@app.route('/api/status', methods=['GET'])
+def get_status_json():
+    update_global_status() 
+    return jsonify(BOT_STATUS)
+
+@app.route('/manual-check', methods=['GET'])
+def manual_check():
+    if ADMIN_ID is None: return jsonify({"message": "Error: Admin ID not configured for this action."}), 400
+    if GLOBAL_ASYNC_LOOP is None: return jsonify({"message": "Error: Asyncio loop not initialized."}), 500
+        
+    try:
+        asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(admin_chat_id=ADMIN_ID), GLOBAL_ASYNC_LOOP)
+        return jsonify({"message": "Halaman MNIT Network Refresh & Screenshot sedang dikirim ke Admin Telegram."})
+    except Exception as e:
+        return jsonify({"message": f"External Error: Gagal menjalankan refresh: {e.__class__.__name__}"}), 500
+
+@app.route('/telegram-status', methods=['GET'])
+def send_telegram_status_route():
+    if ADMIN_ID is None: return jsonify({"message": "Error: Admin ID not configured."}), 400
+    stats_msg = get_status_message(update_global_status())
+    send_tg_monitor(stats_msg, target_chat_id=ADMIN_ID)
+    return jsonify({"message": "Status sent to Telegram Admin."})
+
+@app.route('/clear-cache', methods=['GET'])
+def clear_otp_cache_route():
+    global otp_filter
+    otp_filter.cache = {}
+    otp_filter._save()
+    update_global_status() 
+    return jsonify({"message": f"OTP Cache cleared. New size: {BOT_STATUS['cache_size']}."})
+
+@app.route('/test-message', methods=['GET'])
+def test_message_route():
+    test_data = {
+        "otp": "999999",
+        "phone": "+2250150086627",
+        "service": "MNIT Test",
+        "range": "Ivory Coast",
+        "timestamp": datetime.now().strftime("%H:%M:%S"),
+        "raw_message": "FB:&lt;#&gt;999999 adalah kode konfirmasi. Pesan Penuh."
+    }
+    test_msg = format_otp_message(test_data).replace("🔐 <b>New OTP Received</b>", "🧪 <b>TEST MESSAGE FROM DASHBOARD</b>")
+    send_tg_monitor(test_msg)
+    return jsonify({"message": "Test message sent to main channel."})
+
+@app.route('/start-monitor', methods=['GET'])
+def start_monitor_route():
+    BOT_STATUS["monitoring_active"] = True
+    return jsonify({"message": "Monitor status set to Running."})
+
+@app.route('/stop-monitor', methods=['GET'])
+def stop_monitor_route():
+    BOT_STATUS["monitoring_active"] = False
+    return jsonify({"message": "Monitor status set to Paused."})
 
 
 # ================= FUNGSI UTAMA START =================
 
 def run_flask():
+    """Fungsi untuk menjalankan Flask di thread terpisah."""
     port = int(os.environ.get('PORT', 5000))
-    # ... (setup thread dan loop)
+    
+    global GLOBAL_ASYNC_LOOP
+    # Pastikan loop diatur untuk thread Flask agar bisa menggunakan asyncio.run_coroutine_threadsafe
+    if GLOBAL_ASYNC_LOOP and not asyncio._get_running_loop():
+        asyncio.set_event_loop(GLOBAL_ASYNC_LOOP) 
+        print(f"✅ Async loop successfully set for Flask thread: {current_thread().name}")
+        
+    print(f"✅ Flask API & Dashboard running on http://127.0.0.1:{port}")
+    
     app.run(host='127.0.0.1', port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
     if not all([BOT_MONITOR_TOKEN, CHAT_MONITOR_ID, BOT_USER_TOKEN]):
-        print("FATAL ERROR: Pastikan semua token dan chat ID ada di file .env.")
+        print("FATAL ERROR: Pastikan TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, dan TELEGRAM_BOT_TOKEN_USER ada di file .env.")
     else:
         print("Starting Multi-Bot SMS Monitor and User Service...")
         
