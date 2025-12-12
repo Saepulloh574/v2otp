@@ -1,4 +1,4 @@
-Import asyncio
+import asyncio
 from pyppeteer import connect
 from bs4 import BeautifulSoup
 from datetime import datetime
