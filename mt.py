@@ -4,19 +4,15 @@ import requests
 import time
 import asyncio
 from pyppeteer import connect
-# from dotenv import load_dotenv # <-- DINONAKTIFKAN
-
-# load_dotenv() # <-- DINONAKTIFKAN
+# from dotenv import load_dotenv # Tidak digunakan karena token di hardcode
 
 # ================= Configuration =================
-# Pastikan menggunakan token Bot Pelayanan User
-# 💥 TOKEN DIMASUKKAN LANGSUNG SESUAI PERMINTAAN
+# 💥 TOKEN DIMASUKKAN LANGSUNG
 BOT_TOKEN = "8047851913:AAFGXlRL_e7JcLEMtOqUuuNd_46ZmIoGJN8" 
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 
-# Ganti dengan ID Admin Anda (tetap ambil dari .env jika ada, atau default 0)
+# Ganti dengan ID Admin Anda (ambil dari env jika ada, atau default 0)
 try:
-    # Coba ambil ADMIN_ID dari environment, jika tidak ada, gunakan default 0
     ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", 0))
 except (ValueError, TypeError):
     ADMIN_ID = 0 
@@ -28,7 +24,7 @@ PYPPEETER_URL = "https://v2.mnitnetwork.com/dashboard/getnum"
 BROWSER_PAGE = None
 # ------------------------------
 
-# --- Pilihan Negara & Prefix ---
+# --- Pilihan Negara & Prefix (Static Menu) ---
 NUMBER_PREFIXES = {
     "GUINEA": "2246543XXX",
     "IVORY COAST": "225017054XXX",
@@ -37,19 +33,18 @@ NUMBER_PREFIXES = {
 }
 # --------------------------------------------------------
 
-# In-Memory Cache untuk Request: { Nomor Prefix Request: User ID Telegram }
-# USER_REQUEST_CACHE = {} # Tidak digunakan di script ini karena fokus hanya memicu aksi
-
-
 # ================= Utils & Telegram Functions =================
 
 def api_call(method, payload):
     """Fungsi generik untuk memanggil Telegram API."""
     try:
         r = requests.post(API_BASE + method, data=payload, timeout=10)
+        # Tambahkan logging untuk error jika token bermasalah
+        if not r.ok:
+            print(f"⚠️ Telegram API Response Error: Status {r.status_code}, Body: {r.text[:100]}...")
         return r.json()
     except requests.exceptions.RequestException as e:
-        print(f"❌ Telegram API Error: {e}")
+        print(f"❌ Telegram API Error: {e.__class__.__name__}: {e}")
         return None
 
 def sendMessage(chat_id, text, reply_markup=None):
@@ -88,14 +83,18 @@ async def initialize_browser():
     if BROWSER_PAGE: return BROWSER_PAGE
     
     try:
+        # Menghubungkan ke port debugging yang sudah berjalan (asumsi Chrome sudah dibuka)
         browser = await connect(browserURL="http://127.0.0.1:9222")
         pages = await browser.pages()
         page = None
+        
+        # Cari halaman yang sudah terbuka di URL yang benar
         for p in pages:
             if PYPPEETER_URL in p.url:
                 page = p
                 break
         if not page:
+            # Jika tidak ada, buat halaman baru dan navigasi
             page = await browser.newPage()
             await page.goto(PYPPEETER_URL, {'waitUntil': 'networkidle0'})
         
@@ -103,36 +102,50 @@ async def initialize_browser():
         print("✅ Browser page connected successfully.")
         return BROWSER_PAGE
     except Exception as e:
-        print(f"❌ Gagal menghubungkan browser (Pyppeteer): {e}")
+        print(f"❌ Gagal menghubungkan browser (Pyppeteer): {e.__class__.__name__}: {e}")
         return None
 
 
 async def get_number_on_page(user_id, number_prefix):
-    """Mengisi input dan klik tombol 'Get Numbers'."""
+    """Mengisi input dan klik tombol 'Get Numbers' dengan metode yang aman."""
     page = await initialize_browser()
     if not page:
         sendMessage(user_id, f"❌ Bot monitoring belum siap atau koneksi browser gagal.")
         return
 
-    # 1. Refresh dulu
+    # --- PERBAIKAN STABILITAS: Handle Reload dan Input ---
+    input_selector = 'input[name="numberrange"]'
+    button_selector = '#getNumberBtn'
+    
+    # 1. Refresh dulu (Gunakan timeout lebih pendek, tunggu DOM)
     try:
-        print(f"-> Browser Action: Refreshing page...")
-        await page.reload({'waitUntil': 'networkidle0'})
+        print(f"-> Browser Action: Safely reloading page...")
+        await page.reload({'waitUntil': 'domcontentloaded', 'timeout': 15000}) 
         await asyncio.sleep(1) 
+        
+        # Pastikan tombol dan input ada setelah reload
+        await page.waitForSelector(input_selector, {'timeout': 5000})
+        await page.waitForSelector(button_selector, {'timeout': 5000})
+
     except Exception as e:
-        print(f"❌ Gagal Refresh sebelum input: {e}")
+        print(f"⚠️ Peringatan: Gagal reload/waitForSelector. Mencoba melanjutkan input: {e.__class__.__name__}")
+        await asyncio.sleep(2) # Beri jeda ekstra jika ada isu
 
     try:
-        # 2. Input Nomor (Selector: input[name="numberrange"])
+        # 2. Input Nomor (Metode aman: clear input via JS lalu type)
         print(f"-> Browser Action: Typing {number_prefix}...")
-        await page.evaluate('document.querySelector("input[name=\\"numberrange\\"]").value = ""')
-        await page.type('input[name="numberrange"]', number_prefix, {'delay': 50})
         
-        # 3. Klik Tombol (Selector: #getNumberBtn)
+        # Menghapus teks lama (lebih aman daripada key press)
+        await page.evaluate(f'document.querySelector("{input_selector}").value = ""')
+        await page.type(input_selector, number_prefix, {'delay': 50})
+        
+        # 3. Klik Tombol
         print(f"-> Browser Action: Clicking Get Numbers...")
-        await page.click('#getNumberBtn')
         
-        await asyncio.sleep(3) 
+        # Klik tombol. Kita TIDAK menunggu navigasi karena ini adalah aksi AJAX.
+        await page.click(button_selector)
+        
+        await asyncio.sleep(3) # Tunggu sebentar agar server/AJAX merespon
 
         print(f"✅ Number {number_prefix} successfully requested on the page.")
         
@@ -142,7 +155,7 @@ async def get_number_on_page(user_id, number_prefix):
     except Exception as e:
         error_msg = f"❌ Gagal input/klik tombol di browser: {e.__class__.__name__}: {e}"
         print(error_msg)
-        sendMessage(user_id, f"❌ Gagal memproses nomor `{number_prefix}`. Coba lagi.")
+        sendMessage(user_id, f"❌ Gagal memproses nomor `{number_prefix}`. Pastikan browser berjalan di port :9222. Coba lagi.")
 
 
 # ================= User Bot Core Logic =================
@@ -165,7 +178,7 @@ def create_country_keyboard():
         
     # Tombol Manual Input
     buttons.append([{"text": "➡️ MANUAL INPUT (Prefix)", "callback_data": "manual_input"}])
-    buttons.append([{"text": "ADMIN: Reload Menu", "callback_data": "start_menu"}]) # Admin/Test Button
+    buttons.append([{"text": "ADMIN: Reload Menu", "callback_data": "start_menu"}])
 
     return {"inline_keyboard": buttons}
 
@@ -180,7 +193,7 @@ def handle_start(chat_id):
 
 
 def handle_callback(callback):
-    """Menangani semua callback_query."""
+    """Menangani semua callback_query (Pemilihan Negara & Menu)."""
     
     data = callback.get("data")
     user_id = callback["from"]["id"]
@@ -205,7 +218,6 @@ def handle_callback(callback):
 
             # 2. Memicu Pyppeteer
             try:
-                # Menggunakan ASYNC_LOOP global yang didefinisikan di __main__
                 asyncio.run_coroutine_threadsafe(
                     get_number_on_page(user_id, input_number), 
                     ASYNC_LOOP
@@ -231,7 +243,6 @@ def handle_callback(callback):
 
 def handle_text_input(user_id, chat_id, text):
     """Menangani input teks manual."""
-    # Fungsi sederhana untuk membersihkan nomor (untuk manual input)
     def clean_phone_number(phone):
         cleaned = ''.join(filter(str.isdigit, phone))
         return cleaned
@@ -239,7 +250,7 @@ def handle_text_input(user_id, chat_id, text):
     if text.startswith('+') or text.isdigit():
         input_number = clean_phone_number(text)
         
-        if len(input_number.replace('+', '')) < 6:
+        if len(input_number) < 6:
             sendMessage(chat_id, "⚠️ Format nomor tidak valid. Minimal 6 digit. Contoh: `2246543XXX`",)
             return
         
@@ -273,7 +284,6 @@ async def main_loop():
     # Cek koneksi Pyppeteer di awal
     if not await initialize_browser():
         print("⚠️ Peringatan: Koneksi Browser gagal di awal. Mencoba lagi dalam loop.")
-        # Lanjutkan loop, berharap koneksi bisa pulih
 
     while True:
         try:
@@ -281,7 +291,7 @@ async def main_loop():
             response = requests.get(url, timeout=35).json()
 
             if not response.get("ok"):
-                # 💥 KASUS INI HAMPIR PASTI MASALAH TOKEN/NETWORK
+                # Logging jika koneksi gagal
                 print("❌ Failed to get updates. (Token/Network Error)")
                 print(f"DEBUG: Token starts with {BOT_TOKEN[:5]}...")
                 await asyncio.sleep(5)
