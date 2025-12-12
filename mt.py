@@ -90,7 +90,7 @@ async def initialize_browser():
         
         # Cari halaman yang sudah terbuka di URL yang benar
         for p in pages:
-            if PYPPEETER_URL in p.url:
+            if PYPPEETER_URL in p.url.split('?')[0]: # Cek URL tanpa query params
                 page = p
                 break
         if not page:
@@ -107,55 +107,58 @@ async def initialize_browser():
 
 
 async def get_number_on_page(user_id, number_prefix):
-    """Mengisi input dan klik tombol 'Get Numbers' dengan metode yang aman."""
+    """
+    Mengisi input dengan navigasi URL dan klik tombol 'Get Numbers'.
+    Memanfaatkan URL: https://v2.mnitnetwork.com/dashboard/getnum?range=...
+    """
     page = await initialize_browser()
     if not page:
         sendMessage(user_id, f"❌ Bot monitoring belum siap atau koneksi browser gagal.")
         return
 
-    # --- PERBAIKAN STABILITAS: Handle Reload dan Input ---
-    input_selector = 'input[name="numberrange"]'
-    button_selector = '#getNumberBtn'
+    # 1. Buat URL dengan prefix
+    target_url = f"{PYPPEETER_URL}?range={number_prefix}"
     
-    # 1. Refresh dulu (Gunakan timeout lebih pendek, tunggu DOM)
+    print(f"-> Browser Action: Navigating to URL with prefix: {target_url}")
+    
+    # Lakukan navigasi ke URL
     try:
-        print(f"-> Browser Action: Safely reloading page...")
-        await page.reload({'waitUntil': 'domcontentloaded', 'timeout': 15000}) 
-        await asyncio.sleep(1) 
+        # Navigasi ke URL yang akan mengisi input secara otomatis
+        # Tunggu jaringan idle (networkidle0) untuk memastikan halaman sepenuhnya dimuat
+        await page.goto(target_url, {'waitUntil': 'networkidle0', 'timeout': 30000}) 
         
-        # Pastikan tombol dan input ada setelah reload
-        await page.waitForSelector(input_selector, {'timeout': 5000})
-        await page.waitForSelector(button_selector, {'timeout': 5000})
+        # Tunggu sebentar untuk memastikan DOM siap setelah navigasi
+        await asyncio.sleep(2)
+        
+        button_selector = '#getNumberBtn'
+        
+        # Tunggu tombol muncul
+        await page.waitForSelector(button_selector, {'timeout': 10000})
 
     except Exception as e:
-        print(f"⚠️ Peringatan: Gagal reload/waitForSelector. Mencoba melanjutkan input: {e.__class__.__name__}")
-        await asyncio.sleep(2) # Beri jeda ekstra jika ada isu
+        error_msg = f"❌ Gagal navigasi ke URL {target_url} atau tombol tidak ditemukan: {e.__class__.__name__}: {e}"
+        print(error_msg)
+        sendMessage(user_id, f"❌ Gagal memuat halaman setelah mengisi prefix. Coba lagi.")
+        return
 
     try:
-        # 2. Input Nomor (Metode aman: clear input via JS lalu type)
-        print(f"-> Browser Action: Typing {number_prefix}...")
-        
-        # Menghapus teks lama (lebih aman daripada key press)
-        await page.evaluate(f'document.querySelector("{input_selector}").value = ""')
-        await page.type(input_selector, number_prefix, {'delay': 50})
-        
-        # 3. Klik Tombol
+        # 2. Klik Tombol
         print(f"-> Browser Action: Clicking Get Numbers...")
         
-        # Klik tombol. Kita TIDAK menunggu navigasi karena ini adalah aksi AJAX.
+        # Klik tombol
         await page.click(button_selector)
         
         await asyncio.sleep(3) # Tunggu sebentar agar server/AJAX merespon
 
-        print(f"✅ Number {number_prefix} successfully requested on the page.")
+        print(f"✅ Number {number_prefix} successfully requested via URL.")
         
         # Kirim notifikasi 'PENDING' kembali ke user
         sendMessage(user_id, f"⏳ Nomor `{number_prefix}` sedang diproses. Mohon tunggu notifikasi OTP.")
 
     except Exception as e:
-        error_msg = f"❌ Gagal input/klik tombol di browser: {e.__class__.__name__}: {e}"
+        error_msg = f"❌ Gagal klik tombol di browser: {e.__class__.__name__}: {e}"
         print(error_msg)
-        sendMessage(user_id, f"❌ Gagal memproses nomor `{number_prefix}`. Pastikan browser berjalan di port :9222. Coba lagi.")
+        sendMessage(user_id, f"❌ Gagal memproses nomor `{number_prefix}`. Pastikan browser berjalan. Coba lagi.")
 
 
 # ================= User Bot Core Logic =================
@@ -324,6 +327,7 @@ async def main_loop():
 
 if __name__ == "__main__":
     try:
+        # Menghindari DeprecationWarning pada versi Python lama
         ASYNC_LOOP = asyncio.get_event_loop()
     except RuntimeError:
         ASYNC_LOOP = asyncio.new_event_loop()
