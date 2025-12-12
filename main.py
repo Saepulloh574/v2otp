@@ -105,6 +105,7 @@ def format_otp_message(otp_data):
 FULL MESSAGES:
 <blockquote>{full_message}</blockquote>"""
 
+# Fungsi ini tidak lagi digunakan karena pengiriman selalu satu per satu
 def format_multiple_otps(otp_list):
     if len(otp_list) == 1: return format_otp_message(otp_list[0])
     header = f"🔐 <b>{len(otp_list)} New OTPs Received</b>\n\n"
@@ -182,7 +183,7 @@ class OTPFilter:
         for k in dead: del self.cache[k]
         self._save()
         
-    # PERBAIKAN LOGIC DUPLIKASI: Kunci hanya menggunakan OTP dan Nomor Telepon
+    # Kunci unik: OTP dan Nomor Telepon
     def key(self, d): return f"{d['otp']}_{d['phone']}" 
     
     def is_dup(self, d):
@@ -190,7 +191,8 @@ class OTPFilter:
         return self.key(d) in self.cache
         
     def add(self, d):
-        self.cache[self.key(d)] = {'timestamp':datetime.now().isoformat()}
+        # Menggunakan datetime.now().isoformat() untuk timestamp yang unik
+        self.cache[self.key(d)] = {'timestamp':datetime.now().isoformat()} 
         self._save()
         
     def filter(self, lst):
@@ -199,7 +201,7 @@ class OTPFilter:
             if d.get('otp') and d.get('phone') != 'N/A':
                 if not self.is_dup(d):
                     out.append(d)
-                    self.add(d) # Tambahkan ke cache saat lolos filter
+                    self.add(d)
         return out
 
 otp_filter = OTPFilter()
@@ -445,19 +447,20 @@ async def monitor_sms_loop():
                 new = otp_filter.filter(msgs)
 
                 if new:
-                    print(f"✅ Found {len(new)} new OTP(s). Sending to Telegram...")
+                    print(f"✅ Found {len(new)} new OTP(s). Sending to Telegram one by one with 2-second delay...")
                     
-                    if len(new) > 1:
-                        message_text = format_multiple_otps(new)
+                    # LOGIKA PENGIRIMAN SATU PER SATU DENGAN JEDA 2 DETIK
+                    for i, otp_data in enumerate(new):
+                        message_text = format_otp_message(otp_data)
+                        print(f"   -> Sending OTP {i+1}/{len(new)}: {otp_data['otp']} for {otp_data['phone']}")
+                        
                         send_tg(message_text, with_inline_keyboard=True)
-                        total_sent += len(new)
-                    else:
-                        for otp_data in new:
-                            message_text = format_otp_message(otp_data)
-                            send_tg(message_text, with_inline_keyboard=True)
-                            total_sent += 1
+                        total_sent += 1
+                        
+                        # Jeda yang diminta: 2 detik
+                        await asyncio.sleep(2) 
                     
-                    # Refresh hanya dilakukan di sini (setelah pesan terkirim)
+                    # Refresh hanya dilakukan di sini (setelah semua pesan terkirim)
                     if ADMIN_ID is not None:
                         print("⚙️ Executing automatic refresh and screenshot to admin...")
                         await monitor.refresh_and_screenshot(admin_chat_id=ADMIN_ID)
@@ -474,6 +477,7 @@ async def monitor_sms_loop():
         stats = update_global_status()
         check_cmd(stats)
         
+        # Jeda loop utama (5 detik)
         await asyncio.sleep(5) 
 
 # ================= FLASK WEB SERVER UNTUK API DAN DASHBOARD =================
@@ -542,7 +546,6 @@ def test_message_route():
         "raw_message": "FACEBOOK: FB-999999 adalah kode konfirmasi Facebook anda (Pesan Tes)."
     }
     
-    # Gunakan format_otp_message dan ubah header agar jelas ini adalah tes
     test_msg = format_otp_message(test_data).replace("🔐 <b>New OTP Received</b>", "🧪 <b>TEST MESSAGE FROM DASHBOARD</b>")
     
     send_tg(test_msg)
@@ -565,7 +568,6 @@ def run_flask():
     """Fungsi untuk menjalankan Flask di thread terpisah."""
     port = int(os.environ.get('PORT', 5000))
     
-    # Menetapkan loop Asyncio ke thread Flask untuk menghindari RuntimeError
     global GLOBAL_ASYNC_LOOP
     if GLOBAL_ASYNC_LOOP and not asyncio._get_running_loop():
         asyncio.set_event_loop(GLOBAL_ASYNC_LOOP) 
@@ -573,7 +575,6 @@ def run_flask():
         
     print(f"✅ Flask API & Dashboard running on http://127.0.0.1:{port}")
     
-    # Pastikan server Flask tidak menggunakan reloader saat di lingkungan Pyppeteer/Asyncio
     app.run(host='127.0.0.1', port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
@@ -589,13 +590,11 @@ if __name__ == "__main__":
         print("=======================================================\n")
 
         try:
-            # Dapatkan atau buat loop utama
             loop = asyncio.get_event_loop()
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
         
-        # ⚠️ BARIS PENTING: Simpan loop ke global variable
         GLOBAL_ASYNC_LOOP = loop 
         
         # 1. Mulai Flask di thread terpisah
