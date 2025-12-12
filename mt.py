@@ -4,29 +4,31 @@ import requests
 import time
 import asyncio
 from pyppeteer import connect
-from dotenv import load_dotenv
+# from dotenv import load_dotenv # <-- DINONAKTIFKAN
 
-load_dotenv()
+# load_dotenv() # <-- DINONAKTIFKAN
 
 # ================= Configuration =================
 # Pastikan menggunakan token Bot Pelayanan User
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN_USER") 
+# 💥 TOKEN DIMASUKKAN LANGSUNG SESUAI PERMINTAAN
+BOT_TOKEN = "8244546257:AAGu3vwXPZbfcJznfW9WwhHOkdumyKM079g" 
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}/"
 
-# Ganti dengan ID Admin Anda
+# Ganti dengan ID Admin Anda (tetap ambil dari .env jika ada, atau default 0)
 try:
-    ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID"))
+    # Coba ambil ADMIN_ID dari environment, jika tidak ada, gunakan default 0
+    ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", 0))
 except (ValueError, TypeError):
     ADMIN_ID = 0 
 
 LAST_UPDATE_ID = 0
 
 # --- Pyppeteer Global State ---
-PYPPEETER_URL = "https://v2.mnitnetwork.com/dashboard/getnum" # Ganti jika URL berbeda
+PYPPEETER_URL = "https://v2.mnitnetwork.com/dashboard/getnum" 
 BROWSER_PAGE = None
 # ------------------------------
 
-# --- Pilihan Negara & Prefix (Sesuai Permintaan Anda) ---
+# --- Pilihan Negara & Prefix ---
 NUMBER_PREFIXES = {
     "GUINEA": "2246543XXX",
     "IVORY COAST": "225017054XXX",
@@ -36,7 +38,7 @@ NUMBER_PREFIXES = {
 # --------------------------------------------------------
 
 # In-Memory Cache untuk Request: { Nomor Prefix Request: User ID Telegram }
-USER_REQUEST_CACHE = {} 
+# USER_REQUEST_CACHE = {} # Tidak digunakan di script ini karena fokus hanya memicu aksi
 
 
 # ================= Utils & Telegram Functions =================
@@ -123,7 +125,6 @@ async def get_number_on_page(user_id, number_prefix):
     try:
         # 2. Input Nomor (Selector: input[name="numberrange"])
         print(f"-> Browser Action: Typing {number_prefix}...")
-        # Menghapus teks lama sebelum mengetik
         await page.evaluate('document.querySelector("input[name=\\"numberrange\\"]").value = ""')
         await page.type('input[name="numberrange"]', number_prefix, {'delay': 50})
         
@@ -131,7 +132,6 @@ async def get_number_on_page(user_id, number_prefix):
         print(f"-> Browser Action: Clicking Get Numbers...")
         await page.click('#getNumberBtn')
         
-        # Tunggu sebentar agar status "pending" muncul di dashboard
         await asyncio.sleep(3) 
 
         print(f"✅ Number {number_prefix} successfully requested on the page.")
@@ -165,6 +165,7 @@ def create_country_keyboard():
         
     # Tombol Manual Input
     buttons.append([{"text": "➡️ MANUAL INPUT (Prefix)", "callback_data": "manual_input"}])
+    buttons.append([{"text": "ADMIN: Reload Menu", "callback_data": "start_menu"}]) # Admin/Test Button
 
     return {"inline_keyboard": buttons}
 
@@ -204,6 +205,7 @@ def handle_callback(callback):
 
             # 2. Memicu Pyppeteer
             try:
+                # Menggunakan ASYNC_LOOP global yang didefinisikan di __main__
                 asyncio.run_coroutine_threadsafe(
                     get_number_on_page(user_id, input_number), 
                     ASYNC_LOOP
@@ -219,34 +221,30 @@ def handle_callback(callback):
     # Handle tombol Manual Input
     elif data == "manual_input":
         answerCallbackQuery(callback['id'], "Silakan kirim prefix nomor Anda.")
-        # Kirim pesan baru untuk mengingatkan format
         sendMessage(chat_id_cb, "💬 Silakan kirimkan **prefix** nomor telepon Anda (min 6 digit).\nContoh: `2246543XXX`")
+    
+    # Handle tombol Reload Menu
+    elif data == "start_menu":
+        answerCallbackQuery(callback['id'], "Memuat ulang menu...")
+        handle_start(chat_id_cb)
 
 
 def handle_text_input(user_id, chat_id, text):
     """Menangani input teks manual."""
+    # Fungsi sederhana untuk membersihkan nomor (untuk manual input)
+    def clean_phone_number(phone):
+        cleaned = ''.join(filter(str.isdigit, phone))
+        return cleaned
+    
     if text.startswith('+') or text.isdigit():
-        # Asumsi fungsi clean_phone_number dari script utama ada
-        # Jika tidak ada, gunakan raw text untuk contoh
-        
-        # --- Simulasikan clean_phone_number ---
-        def clean_phone_number(phone):
-            cleaned = ''.join(filter(str.isdigit, phone))
-            if cleaned and not cleaned.startswith('+'):
-                return '+' + cleaned if len(cleaned) >= 10 else cleaned
-            return phone
-        # ----------------------------------------
-
         input_number = clean_phone_number(text)
         
-        # Validasi minimal 6 digit
         if len(input_number.replace('+', '')) < 6:
             sendMessage(chat_id, "⚠️ Format nomor tidak valid. Minimal 6 digit. Contoh: `2246543XXX`",)
             return
         
         print(f"✅ User {user_id} requested number manually: {input_number}")
         
-        # Memicu Pyppeteer
         try:
             asyncio.run_coroutine_threadsafe(
                 get_number_on_page(user_id, input_number), 
@@ -257,7 +255,7 @@ def handle_text_input(user_id, chat_id, text):
             print(f"❌ Error memicu aksi Pyppeteer: {e}")
         
     else:
-        # Jika user mengirim teks lain, kirimkan kembali menu
+        # Jika user mengirim teks lain yang tidak dikenal, kirimkan kembali menu
         handle_start(chat_id)
 
 
@@ -267,12 +265,15 @@ async def main_loop():
     global LAST_UPDATE_ID
 
     if not BOT_TOKEN:
-        print("FATAL: TELEGRAM_BOT_TOKEN_USER not set.")
+        print("FATAL: BOT_TOKEN not set.")
         return
 
     print("🚀 User Bot Service (Pyppeteer Trigger) started...")
-    # Lakukan inisialisasi browser di awal
-    await initialize_browser() 
+    
+    # Cek koneksi Pyppeteer di awal
+    if not await initialize_browser():
+        print("⚠️ Peringatan: Koneksi Browser gagal di awal. Mencoba lagi dalam loop.")
+        # Lanjutkan loop, berharap koneksi bisa pulih
 
     while True:
         try:
@@ -280,7 +281,9 @@ async def main_loop():
             response = requests.get(url, timeout=35).json()
 
             if not response.get("ok"):
-                print("❌ Failed to get updates.")
+                # 💥 KASUS INI HAMPIR PASTI MASALAH TOKEN/NETWORK
+                print("❌ Failed to get updates. (Token/Network Error)")
+                print(f"DEBUG: Token starts with {BOT_TOKEN[:5]}...")
                 await asyncio.sleep(5)
                 continue
 
