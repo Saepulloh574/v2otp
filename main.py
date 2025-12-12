@@ -181,20 +181,25 @@ class OTPFilter:
             except: dead.append(k)
         for k in dead: del self.cache[k]
         self._save()
-    def key(self, d): return f"{d['otp']}_{d['phone']}_{d['service']}_{d.get('range', 'N/A')}"
+        
+    # PERBAIKAN LOGIC DUPLIKASI: Kunci hanya menggunakan OTP dan Nomor Telepon
+    def key(self, d): return f"{d['otp']}_{d['phone']}" 
+    
     def is_dup(self, d):
         self._cleanup()
         return self.key(d) in self.cache
+        
     def add(self, d):
         self.cache[self.key(d)] = {'timestamp':datetime.now().isoformat()}
         self._save()
+        
     def filter(self, lst):
         out = []
         for d in lst:
             if d.get('otp') and d.get('phone') != 'N/A':
                 if not self.is_dup(d):
                     out.append(d)
-                    self.add(d)
+                    self.add(d) # Tambahkan ke cache saat lolos filter
         return out
 
 otp_filter = OTPFilter()
@@ -245,8 +250,7 @@ def send_photo_tg(photo_path, caption="", target_chat_id=None):
         return False
 
 # ================= Scraper & Monitor Class =================
-URL = "https://v2.mnitnetwork.com/dashboard/getnum" # <--- URL BARU
-# Menghapus OTP_MESSAGE_PATTERNS dan find_clean_message karena data-sms lebih akurat
+URL = "https://v2.mnitnetwork.com/dashboard/getnum" 
 
 class SMSMonitor:
     def __init__(self, url=URL):
@@ -272,8 +276,6 @@ class SMSMonitor:
 
     async def fetch_sms(self):
         if not self.page: await self.initialize()
-        
-        # [PERUBAHAN]: Tidak ada reload di sini. Hanya mengambil konten terbaru.
             
         html = await self.page.content()
         soup = BeautifulSoup(html, "html.parser")
@@ -296,11 +298,9 @@ class SMSMonitor:
                 
                 # B. Raw Message (dari data-sms attribute)
                 copy_icon = otp_badge_span.find("i", class_="copy-icon")
-                # Mengambil data-sms. Jika tidak ada, gunakan teks badge (fallback)
                 raw_message = copy_icon.get('data-sms', 'N/A') if copy_icon else otp_badge_span.get_text(strip=True)
                 
                 # C. OTP (diekstrak dari raw_message atau teks badge yang bersih)
-                # Ambil teks OTP dari badge (e.g., "23670")
                 otp_raw_text = otp_badge_span.get_text(strip=True, separator=' ')
                 otp = extract_otp_from_text(otp_raw_text)
                 
@@ -339,7 +339,6 @@ class SMSMonitor:
         screenshot_filename = f"screenshot_{int(time.time())}.png"
         try:
             print("🔄 Performing page refresh...")
-            # Ini adalah satu-satunya tempat refresh terjadi
             await self.page.reload({'waitUntil': 'networkidle0'}) 
             print(f"📸 Taking screenshot: {screenshot_filename}")
             await self.page.screenshot({'path': screenshot_filename, 'fullPage': True})
@@ -357,7 +356,7 @@ class SMSMonitor:
                 print(f"🗑️ Cleaned up {screenshot_filename}")
     
     async def fetch_and_process_once(self, admin_chat_id):
-        pass # Fungsi ini tidak lagi digunakan.
+        pass
 
 monitor = SMSMonitor()
 
@@ -414,7 +413,6 @@ def check_cmd(stats):
                     )
                 elif text == "/refresh":
                     send_tg("⏳ Executing page refresh and screenshot...", with_inline_keyboard=False, target_chat_id=chat_id)
-                    # Ini adalah refresh yang dipicu oleh perintah admin
                     if GLOBAL_ASYNC_LOOP:
                         asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(admin_chat_id=chat_id), GLOBAL_ASYNC_LOOP)
                     else:
@@ -575,6 +573,7 @@ def run_flask():
         
     print(f"✅ Flask API & Dashboard running on http://127.0.0.1:{port}")
     
+    # Pastikan server Flask tidak menggunakan reloader saat di lingkungan Pyppeteer/Asyncio
     app.run(host='127.0.0.1', port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
