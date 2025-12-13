@@ -96,7 +96,6 @@ def format_otp_message(otp_data):
     full_message = otp_data.get('raw_message', 'N/A')
     
     # Melakukan escaping HTML pada pesan penuh agar Telegram tidak error membaca tag HTML
-    # Ini harus dipertahankan untuk keamanan, karena pesan bisa mengandung '<' atau '>'
     full_message_escaped = full_message.replace('<', '&lt;').replace('>', '&gt;') 
     
     return f"""🔐 <b>New OTP Received</b>
@@ -142,13 +141,17 @@ def get_status_message(stats):
 
 <i>Bot is running</i>"""
 
-# ================= OTP Filter Class =================
+# ================= OTP Filter Class (MODIFIED) =================
 
 class OTPFilter:
     def __init__(self, file='otp_cache.json', expire=30):
         self.file = file
         self.expire = expire
         self.cache = self._load()
+        # Mendorong cleanup saat inisialisasi untuk membuang entri kadaluarsa
+        self._cleanup() 
+        print(f"✅ OTP Cache loaded. Size after cleanup: {len(self.cache)} items.")
+        
     def _load(self):
         if os.path.exists(self.file):
             try:
@@ -163,21 +166,25 @@ class OTPFilter:
                 return {}
         return {}
     def _save(self): json.dump(self.cache, open(self.file,'w'), indent=2)
+    
     def _cleanup(self):
         now = datetime.now()
         dead = []
         for k,v in self.cache.items():
             try:
+                # Perubahan: Jika timestamp sudah lewat batas expire, hapus dari cache.
                 t = datetime.fromisoformat(v['timestamp'])
                 if (now-t).total_seconds() > self.expire*60: dead.append(k)
             except: dead.append(k)
         for k in dead: del self.cache[k]
-        self._save()
+        # Simpan state cache setelah cleanup
+        self._save() 
         
     def key(self, d): return f"{d['otp']}_{d['phone']}" 
     
     def is_dup(self, d):
-        self._cleanup()
+        # Memanggil cleanup setiap kali sebelum cek duplikat
+        self._cleanup() 
         return self.key(d) in self.cache
         
     def add(self, d):
@@ -240,7 +247,7 @@ def send_photo_tg(photo_path, caption="", target_chat_id=None):
         print(f"❌ Unknown Error in send_photo_tg: {e}")
         return False
 
-# ================= Scraper & Monitor Class =================
+# ================= Scraper & Monitor Class (MODIFIED) =================
 URL = "https://v2.mnitnetwork.com/dashboard/getnum" 
 
 class SMSMonitor:
@@ -285,18 +292,14 @@ class SMSMonitor:
                 copy_icon = otp_badge_span.find("i", class_="copy-icon")
                 raw_message_original = copy_icon.get('data-sms', 'N/A') if copy_icon else otp_badge_span.get_text(strip=True)
                 
-                # 💥 LOGIKA PENGAMBILAN PESAN PENUH MENTAH 💥
-                # Tujuannya: Ambil semua teks setelah tanda ':' (Service Name)
+                # LOGIKA PENGAMBILAN PESAN PENUH MENTAH 
                 if ':' in raw_message_original and raw_message_original != 'N/A':
-                    # Ambil semua teks setelah tanda titik dua pertama.
-                    # HANYA gunakan .strip() untuk menghilangkan spasi di awal.
                     raw_message_clean = raw_message_original.split(':', 1)[1].strip()
                 else:
-                    # Jika tidak ada ':' (Service Name), gunakan pesan asli
                     raw_message_clean = raw_message_original
                 
                 
-                # C. OTP (Ambil dari teks badge yang jelas, fallback ke regex jika gagal)
+                # C. OTP 
                 otp_raw_text_parts = [t.strip() for t in otp_badge_span.contents if t.name is None and t.strip()]
                 otp = otp_raw_text_parts[0] if otp_raw_text_parts else None 
                 
@@ -324,10 +327,27 @@ class SMSMonitor:
                         "service": service,
                         "range": range_text,
                         "timestamp": datetime.now().strftime("%H:%M:%S"),
-                        "raw_message": raw_message_clean # Menggunakan pesan yang sudah bersih minimalis
+                        "raw_message": raw_message_clean 
                     })
         return messages
     
+    # --- FUNGSI BARU: SOFT REFRESH (TANPA SCREENSHOT) ---
+    async def soft_refresh(self): 
+        """Memuat ulang halaman tanpa screenshot atau notifikasi Telegram."""
+        if not self.page: 
+            try: await self.initialize()
+            except Exception as e:
+                print(f"❌ Error during initial connect for soft refresh: {e}")
+                return
+
+        try:
+            print("🔄 Performing soft page refresh...")
+            await self.page.reload({'waitUntil': 'networkidle0'})
+            print("✅ Soft refresh complete.")
+        except Exception as e:
+            print(f"❌ Error during soft refresh: {e}")
+    # ----------------------------------------------------
+
     async def refresh_and_screenshot(self, admin_chat_id): 
         if not self.page:
             try: await self.initialize()
@@ -427,6 +447,8 @@ def check_cmd(stats):
 async def monitor_sms_loop():
     global total_sent
     global BOT_STATUS
+    # Penambahan: Variabel untuk melacak waktu terakhir soft refresh
+    last_soft_refresh_time = time.time()
 
     try:
         await monitor.initialize()
@@ -441,6 +463,15 @@ async def monitor_sms_loop():
     while True:
         try:
             if BOT_STATUS["monitoring_active"]:
+                
+                # --- Logika Soft Refresh Setiap 1 Menit (BARU) ---
+                current_time = time.time()
+                # 60 detik = 1 menit
+                if current_time - last_soft_refresh_time >= 60: 
+                    await monitor.soft_refresh() 
+                    last_soft_refresh_time = current_time 
+                # --------------------------------------------------
+
                 msgs = await monitor.fetch_sms()
                 new = otp_filter.filter(msgs)
 
@@ -457,6 +488,7 @@ async def monitor_sms_loop():
                         await asyncio.sleep(2) 
                     
                     if ADMIN_ID is not None:
+                        # Refresh otomatis DENGAN SCREENSHOT setelah OTP baru terdeteksi
                         print("⚙️ Executing automatic refresh and screenshot to admin...")
                         await monitor.refresh_and_screenshot(admin_chat_id=ADMIN_ID)
                     else:
@@ -472,6 +504,7 @@ async def monitor_sms_loop():
         stats = update_global_status()
         check_cmd(stats)
         
+        # Delay utama 5 detik
         await asyncio.sleep(5) 
 
 # ================= FLASK WEB SERVER UNTUK API DAN DASHBOARD =================
@@ -563,6 +596,7 @@ def run_flask():
     
     global GLOBAL_ASYNC_LOOP
     if GLOBAL_ASYNC_LOOP and not asyncio._get_running_loop():
+        # Mengatur loop event untuk Flask thread jika belum diatur
         asyncio.set_event_loop(GLOBAL_ASYNC_LOOP) 
         print(f"✅ Async loop successfully set for Flask thread: {current_thread().name}")
         
