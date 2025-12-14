@@ -1,7 +1,7 @@
 import asyncio
 from pyppeteer import connect
 from bs4 import BeautifulSoup
-from datetime import datetime, timezone # <--- PERUBAHAN: Import timezone
+from datetime import datetime, timezone 
 import re
 import json
 import os
@@ -532,7 +532,8 @@ async def monitor_sms_loop():
                 new = otp_filter.filter(msgs)
 
                 if new:
-                    print(f"✅ Found {len(new)} new OTP(s)}. Sending to Telegram one by one with 2-second delay...")
+                    # BARIS PERBAIKAN SINTAKSIS f-string (dari OTP(s)} menjadi OTP(s)}})
+                    print(f"✅ Found {len(new)} new OTP(s)}}. Sending to Telegram one by one with 2-second delay...")
                     
                     for i, otp_data in enumerate(new):
                         message_text = format_otp_message(otp_data)
