@@ -10,6 +10,7 @@ import time
 from dotenv import load_dotenv
 import socket
 from threading import Thread, current_thread
+from typing import Dict, Any, List
 
 # --- Import Flask ---
 from flask import Flask, jsonify, render_template
@@ -19,7 +20,7 @@ from flask import Flask, jsonify, render_template
 load_dotenv()
 
 # ================= Konstanta Telegram untuk Tombol =================
-TELEGRAM_BOT_LINK = "https://t.me/zuraxridbot"
+TELEGRAM_BOT_LINK = "https://t.me/myzuraisgoodbot" # <-- MODIFIKASI: Link baru
 TELEGRAM_ADMIN_LINK = "https://t.me/Imr1d"
 
 # ================= Telegram Configuration (Loaded from .env) =================
@@ -37,6 +38,23 @@ LAST_ID = 0
 GLOBAL_ASYNC_LOOP = None # Variabel global untuk menyimpan event loop utama
 
 # ================= Utils =================
+
+COUNTRY_EMOJI = {
+    "NEPAL": "🇳🇵",
+    "IVORY COAST": "🇨🇮",
+    "GUINEA": "🇬🇳",
+    "CENTRAL AFRIKA": "🇨🇫",
+    "TOGO": "🇹🇬",
+    "TAJIKISTAN": "🇹🇯",
+    "BENIN": "🇧🇯",
+    "SIERRA LEONE": "🇸🇱",
+    "MADAGASCAR": "🇲🇬",
+    "AFGANISTAN": "🇦🇫",
+}
+
+def get_country_emoji(country_name: str) -> str:
+    """Mengembalikan emoji berdasarkan nama negara/range."""
+    return COUNTRY_EMOJI.get(country_name.strip().upper(), "")
 
 def get_local_ip():
     """Mencari IP address lokal perangkat untuk keperluan fallback."""
@@ -86,7 +104,8 @@ def mask_phone_number(phone, visible_start=4, visible_end=4):
     masked_part = '*' * mask_length
     return prefix + start_part + masked_part + end_part
 
-def format_otp_message(otp_data):
+def format_otp_message(otp_data: Dict[str, Any]) -> str:
+    """Memformat data OTP menjadi pesan Telegram dengan emoji."""
     otp = otp_data.get('otp', 'N/A')
     phone = otp_data.get('phone', 'N/A')
     masked_phone = mask_phone_number(phone, visible_start=4, visible_end=4)
@@ -95,12 +114,16 @@ def format_otp_message(otp_data):
     timestamp = otp_data.get('timestamp', datetime.now().strftime('%H:%M:%S'))
     full_message = otp_data.get('raw_message', 'N/A')
     
+    # Menambahkan emoji bendera
+    emoji = get_country_emoji(range_text)
+    
     # Melakukan escaping HTML pada pesan penuh agar Telegram tidak error membaca tag HTML
     full_message_escaped = full_message.replace('<', '&lt;').replace('>', '&gt;') 
     
+    # <-- MODIFIKASI: Mengubah label dan menambahkan emoji -->
     return f"""🔐 <b>New OTP Received</b>
 
-🏷️ Range: <b>{range_text}</b>
+🌍 Country: <b>{range_text} {emoji}</b>
 
 📱 Number: <code>{masked_phone}</code>
 🌐 Service: <b>{service}</b>
@@ -117,8 +140,20 @@ def extract_otp_from_text(text):
     for p in patterns:
         m = re.search(p, text, re.I)
         if m:
-            if (len(m.group(1)) == 4 and '20' not in m.group(1)) or len(m.group(1)) > 4:
-                return m.group(1)
+            # Grup 1 adalah nilai OTP yang ditangkap oleh regex
+            matched_otp = m.group(1) if len(m.groups()) >= 1 else m.group(0)
+            
+            # Pengecekan keamanan untuk 4 digit (agar tidak salah mengira tahun sebagai OTP)
+            if len(matched_otp) == 4:
+                try:
+                    # Jika 4 digit dan bukan tahun 2000-2099, ambil.
+                    if 2000 <= int(matched_otp) <= 2099: continue 
+                except ValueError:
+                    # Jika bukan angka, lanjut ke pola berikutnya
+                    continue 
+
+            return matched_otp
+            
     return None
 
 def clean_service_name(service):
@@ -152,7 +187,7 @@ class OTPFilter:
         self._cleanup() 
         print(f"✅ OTP Cache loaded. Size after cleanup: {len(self.cache)} items.")
         
-    def _load(self):
+    def _load(self) -> Dict[str, Dict[str, Any]]:
         if os.path.exists(self.file):
             try:
                 if os.stat(self.file).st_size > 0:
@@ -165,6 +200,7 @@ class OTPFilter:
                 print(f"Error loading cache: {e}")
                 return {}
         return {}
+        
     def _save(self): json.dump(self.cache, open(self.file,'w'), indent=2)
     
     def _cleanup(self):
@@ -172,32 +208,44 @@ class OTPFilter:
         dead = []
         for k,v in self.cache.items():
             try:
-                # Perubahan: Jika timestamp sudah lewat batas expire, hapus dari cache.
                 t = datetime.fromisoformat(v['timestamp'])
+                # Hapus jika timestamp sudah lewat batas expire (30 menit default)
                 if (now-t).total_seconds() > self.expire*60: dead.append(k)
-            except: dead.append(k)
+            except: 
+                # Jika format timestamp salah, hapus juga
+                dead.append(k)
         for k in dead: del self.cache[k]
-        # Simpan state cache setelah cleanup
         self._save() 
         
-    def key(self, d): return f"{d['otp']}_{d['phone']}" 
+    # <-- MODIFIKASI: Kunci cache hanya menggunakan OTP (nilai 'otp') -->
+    def key(self, d: Dict[str, Any]) -> str: 
+        """Menghasilkan kunci cache hanya dari nilai OTP."""
+        return str(d.get('otp'))
     
-    def is_dup(self, d):
-        # Memanggil cleanup setiap kali sebelum cek duplikat
+    def is_dup(self, d: Dict[str, Any]) -> bool:
+        """Memeriksa apakah OTP sudah ada di cache."""
         self._cleanup() 
-        return self.key(d) in self.cache
+        key = self.key(d)
+        # Jika key adalah None atau 'None' karena tidak ada OTP, anggap bukan duplikat.
+        if not key or key == 'None': return False 
+        return key in self.cache
         
-    def add(self, d):
-        self.cache[self.key(d)] = {'timestamp':datetime.now().isoformat()} 
+    def add(self, d: Dict[str, Any]):
+        """Menambahkan OTP ke cache."""
+        key = self.key(d)
+        if not key or key == 'None': return
+        self.cache[key] = {'timestamp':datetime.now().isoformat()} 
         self._save()
         
-    def filter(self, lst):
+    def filter(self, lst: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Memfilter list pesan, hanya menyertakan yang bukan duplikat dan menambahkannya ke cache."""
         out = []
         for d in lst:
+            # Hanya proses jika ada OTP dan nomor telepon
             if d.get('otp') and d.get('phone') != 'N/A':
                 if not self.is_dup(d):
                     out.append(d)
-                    self.add(d)
+                    self.add(d) # Tambahkan ke cache setelah lolos filter
         return out
 
 otp_filter = OTPFilter()
@@ -270,7 +318,7 @@ class SMSMonitor:
         self.page = page
         print("✅ Browser page connected successfully.")
 
-    async def fetch_sms(self):
+    async def fetch_sms(self) -> List[Dict[str, Any]]:
         if not self.page: await self.initialize()
             
         html = await self.page.content()
@@ -290,9 +338,11 @@ class SMSMonitor:
                 
                 # B. Raw Message (Original & Cleaned)
                 copy_icon = otp_badge_span.find("i", class_="copy-icon")
-                raw_message_original = copy_icon.get('data-sms', 'N/A') if copy_icon else otp_badge_span.get_text(strip=True)
+                # Mengambil dari 'data-sms' jika ada, jika tidak, fallback ke teks badge
+                raw_message_original = copy_icon.get('data-sms', 'N/A') if copy_icon and copy_icon.get('data-sms') else otp_badge_span.get_text(strip=True)
                 
                 # LOGIKA PENGAMBILAN PESAN PENUH MENTAH 
+                # Biasanya, pesan asli di mnitnetwork adalah 'SERVICE: Pesan penuh'
                 if ':' in raw_message_original and raw_message_original != 'N/A':
                     raw_message_clean = raw_message_original.split(':', 1)[1].strip()
                 else:
@@ -300,10 +350,12 @@ class SMSMonitor:
                 
                 
                 # C. OTP 
+                # 1. Coba ambil dari teks langsung di dalam span (tanpa tag anak)
                 otp_raw_text_parts = [t.strip() for t in otp_badge_span.contents if t.name is None and t.strip()]
-                otp = otp_raw_text_parts[0] if otp_raw_text_parts else None 
+                otp = otp_raw_text_parts[0] if otp_raw_text_parts and otp_raw_text_parts[0].isdigit() else None 
                 
-                if not (otp and otp.isdigit()):
+                # 2. Jika gagal/bukan digit, gunakan fungsi ekstraksi yang fleksibel
+                if not otp:
                     otp_full_text = otp_badge_span.get_text(strip=True, separator=' ')
                     otp = extract_otp_from_text(otp_full_text)
                     
@@ -331,7 +383,6 @@ class SMSMonitor:
                     })
         return messages
     
-    # --- FUNGSI BARU: SOFT REFRESH (TANPA SCREENSHOT) ---
     async def soft_refresh(self): 
         """Memuat ulang halaman tanpa screenshot atau notifikasi Telegram."""
         if not self.page: 
@@ -346,7 +397,6 @@ class SMSMonitor:
             print("✅ Soft refresh complete.")
         except Exception as e:
             print(f"❌ Error during soft refresh: {e}")
-    # ----------------------------------------------------
 
     async def refresh_and_screenshot(self, admin_chat_id): 
         if not self.page:
@@ -447,7 +497,6 @@ def check_cmd(stats):
 async def monitor_sms_loop():
     global total_sent
     global BOT_STATUS
-    # Penambahan: Variabel untuk melacak waktu terakhir soft refresh
     last_soft_refresh_time = time.time()
 
     try:
@@ -464,13 +513,12 @@ async def monitor_sms_loop():
         try:
             if BOT_STATUS["monitoring_active"]:
                 
-                # --- Logika Soft Refresh Setiap 1 Menit (BARU) ---
+                # --- Logika Soft Refresh Setiap 1 Menit ---
                 current_time = time.time()
-                # 60 detik = 1 menit
                 if current_time - last_soft_refresh_time >= 60: 
                     await monitor.soft_refresh() 
                     last_soft_refresh_time = current_time 
-                # --------------------------------------------------
+                # ------------------------------------------
 
                 msgs = await monitor.fetch_sms()
                 new = otp_filter.filter(msgs)
@@ -562,14 +610,14 @@ def clear_otp_cache_route():
 @app.route('/test-message', methods=['GET'])
 def test_message_route():
     """Mengirim pesan tes ke Telegram menggunakan format OTP."""
-    # Pesan Tes yang meniru format terbersih
+    # <-- MODIFIKASI: Pesan Tes yang meniru format terbersih -->
     test_data = {
-        "otp": "999999",
+        "otp": "123456",
         "phone": "+2250150086627",
-        "service": "MNIT Test",
+        "service": "Facebook",
         "range": "Ivory Coast",
         "timestamp": datetime.now().strftime("%H:%M:%S"),
-        "raw_message": "FB-999999 adalah kode konfirmasi Facebook anda (Pesan Tes) Penuh. Jangan menggunakan kode ini."
+        "raw_message": "123456 adalah kode konfirmasi Facebook anda. Harap berhati-hati dan jangan pernah membagikan kode ini. ID Referensi: AAABBBCC"
     }
     
     test_msg = format_otp_message(test_data).replace("🔐 <b>New OTP Received</b>", "🧪 <b>TEST MESSAGE FROM DASHBOARD</b>")
