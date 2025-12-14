@@ -15,56 +15,31 @@ from threading import Thread, current_thread
 from flask import Flask, jsonify, render_template
 # --------------------
 
+# Muat variabel lingkungan dari file .env
 load_dotenv()
 
-# ================= Configuration & Global State =================
-URL = "https://v2.mnitnetwork.com/dashboard/getnum" 
+# ================= Konstanta Telegram untuk Tombol =================
+TELEGRAM_BOT_LINK = "https://t.me/zuraxridbot"
+TELEGRAM_ADMIN_LINK = "https://t.me/Imr1d"
 
-# Bot Monitor (Old)
-BOT_MONITOR_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHAT_MONITOR_ID = os.getenv("TELEGRAM_CHAT_ID")
+# ================= Telegram Configuration (Loaded from .env) =================
+BOT = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT = os.getenv("TELEGRAM_CHAT_ID")
 try:
     ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID"))
 except (ValueError, TypeError):
+    print("⚠️ WARNING: TELEGRAM_ADMIN_ID tidak valid. Perintah admin dinonaktifkan.")
     ADMIN_ID = None
-LAST_ID_MONITOR = 0
 
-# Bot Pelayanan User (New)
-BOT_USER_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN_USER")
-LAST_ID_USER = 0
+LAST_ID = 0
 
-# Constants
-TELEGRAM_BOT_LINK = "https://t.me/zuraxridbot" # Ganti dengan link bot Anda
-TELEGRAM_ADMIN_LINK = "https://t.me/Imr1d"     # Ganti dengan link admin Anda
+# ================= Global State for Asyncio Loop =================
+GLOBAL_ASYNC_LOOP = None # Variabel global untuk menyimpan event loop utama
 
-# In-Memory Cache untuk OTP dan User Request
-otp_filter = None # Akan diinisialisasi nanti
-
-# --- Variabel Persistensi User ---
-USER_FILE = 'user.json' 
-USER_ALLOWED_IDS = set() # Akan dimuat dari user.json
-# ----------------------------------
-
-USER_REQUEST_CACHE = {} # { Nomor Prefix Request: User ID Telegram }
-
-# Global State
-GLOBAL_ASYNC_LOOP = None
-start = time.time()
-total_sent = 0
-
-BOT_STATUS = {
-    "status": "Initializing...",
-    "uptime": "--",
-    "total_otps_sent": 0,
-    "last_check": "Never",
-    "cache_size": 0,
-    "monitoring_active": True
-}
-
-
-# ================= Utils & Telegram Functions =================
+# ================= Utils =================
 
 def get_local_ip():
+    """Mencari IP address lokal perangkat untuk keperluan fallback."""
     s = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -74,7 +49,8 @@ def get_local_ip():
     except Exception:
         return "127.0.0.1" 
     finally:
-        if s: s.close()
+        if s:
+            s.close()
             
 def create_inline_keyboard():
     keyboard = {
@@ -116,10 +92,11 @@ def format_otp_message(otp_data):
     masked_phone = mask_phone_number(phone, visible_start=4, visible_end=4)
     service = otp_data.get('service', 'Unknown')
     range_text = otp_data.get('range', 'N/A')
+    timestamp = otp_data.get('timestamp', datetime.now().strftime('%H:%M:%S'))
     full_message = otp_data.get('raw_message', 'N/A')
     
-    # PERBAIKAN ESCAPING HTML: Escape &, <, dan >
-    full_message_escaped = full_message.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    # Melakukan escaping HTML pada pesan penuh agar Telegram tidak error membaca tag HTML
+    full_message_escaped = full_message.replace('<', '&lt;').replace('>', '&gt;') 
     
     return f"""🔐 <b>New OTP Received</b>
 
@@ -133,7 +110,9 @@ FULL MESSAGES:
 <blockquote>{full_message_escaped}</blockquote>"""
 
 def extract_otp_from_text(text):
+    """Fungsi ekstraksi OTP yang fleksibel (dipertahankan untuk keamanan)."""
     if not text: return None
+    # Pola untuk mencari 6, 5, atau 4 digit (memastikan 4 digit bukan tahun)
     patterns = [ r'\b(\d{6})\b', r'\b(\d{5})\b', r'\b(\d{4})\b', r'code[:\s]*(\d+)', r'verification[:\s]*(\d+)', r'otp[:\s]*(\d+)', r'pin[:\s]*(\d+)' ]
     for p in patterns:
         m = re.search(p, text, re.I)
@@ -162,82 +141,73 @@ def get_status_message(stats):
 
 <i>Bot is running</i>"""
 
-# --- Fungsi Persistensi User ---
-def load_users():
-    if os.path.exists(USER_FILE):
-        try:
-            with open(USER_FILE, 'r') as f:
-                return set(json.load(f))
-        except (json.JSONDecodeError, FileNotFoundError):
-            return set()
-    return set()
-
-def save_users(user_set):
-    try:
-        with open(USER_FILE, 'w') as f:
-            json.dump(list(user_set), f, indent=2)
-    except Exception as e:
-        print(f"❌ Error saving {USER_FILE}: {e}")
-# ----------------------------------------
-
+# ================= OTP Filter Class (PERMANENT CACHE) =================
 
 class OTPFilter:
-    # PERBAIKAN SINTAKSIS: expire=30
     def __init__(self, file='otp_cache.json', expire=30):
         self.file = file
         self.expire = expire
         self.cache = self._load()
+        # Cache bersifat PERMANEN, tidak ada cleanup berdasarkan waktu saat init
+        print(f"✅ OTP Cache (Permanent) loaded. Size: {len(self.cache)} items.")
+        
     def _load(self):
         if os.path.exists(self.file):
             try:
                 if os.stat(self.file).st_size > 0:
                     with open(self.file, 'r') as f: return json.load(f)
                 else: return {}
-            except json.JSONDecodeError: return {}
-            except Exception: return {}
+            except json.JSONDecodeError as e:
+                print(f"⚠️ WARNING: Cache file '{self.file}' corrupted. Resetting cache. Error: {e}")
+                return {}
+            except Exception as e:
+                print(f"Error loading cache: {e}")
+                return {}
         return {}
-    def _save(self): json.dump(self.cache, open(self.file,'w'), indent=2)
-    def _cleanup(self):
-        now = datetime.now()
-        dead = []
-        for k,v in self.cache.items():
-            try:
-                t = datetime.fromisoformat(v['timestamp'])
-                if (now-t).total_seconds() > self.expire*60: dead.append(k)
-            except: dead.append(k)
-        for k in dead: del self.cache[k]
-        self._save()
+        
+    def _save(self): 
+        json.dump(self.cache, open(self.file,'w'), indent=2)
+    
+    # Fungsi _cleanup dihapus total karena cache tidak kadaluarsa
         
     def key(self, d): return f"{d['otp']}_{d['phone']}" 
     
     def is_dup(self, d):
-        self._cleanup()
+        # Tidak ada pemanggilan cleanup
         return self.key(d) in self.cache
         
     def add(self, d):
+        # Timestamp tetap disimpan tapi hanya sebagai catatan, tidak digunakan untuk expiry
         self.cache[self.key(d)] = {'timestamp':datetime.now().isoformat()} 
         self._save()
         
     def filter(self, lst):
         out = []
+        failed = [] 
         for d in lst:
             if d.get('otp') and d.get('phone') != 'N/A':
                 if not self.is_dup(d):
                     out.append(d)
                     self.add(d)
-        return out
+                else:
+                    failed.append(d) 
+        return out, failed 
 
-# --- Fungsi Telegram Generik ---
-def send_tg_generic(token, chat_id, text, with_inline_keyboard=False):
-    if not token or not chat_id:
-        print("❌ Telegram config missing. Cannot send message.")
+otp_filter = OTPFilter()
+
+# ================= Telegram Functionality =================
+
+def send_tg(text, with_inline_keyboard=False, target_chat_id=None):
+    chat_id_to_use = target_chat_id if target_chat_id is not None else CHAT
+    if not BOT or not chat_id_to_use:
+        print("❌ Telegram config missing (BOT or CHAT ID). Cannot send message.")
         return
-    payload = {'chat_id': chat_id, 'text': text, 'parse_mode': 'HTML'}
+    payload = {'chat_id': chat_id_to_use, 'text': text, 'parse_mode': 'HTML'}
     if with_inline_keyboard:
-        payload['reply_markup'] = create_inline_keyboard() 
+        payload['reply_markup'] = create_inline_keyboard()
     try:
         response = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
+            f"https://api.telegram.org/bot{BOT}/sendMessage",
             data=payload,
             timeout=15  
         )
@@ -245,132 +215,33 @@ def send_tg_generic(token, chat_id, text, with_inline_keyboard=False):
             print(f"⚠️ Telegram API Error ({response.status_code}): {response.text}")
     except requests.exceptions.RequestException as e:
         print(f"❌ Telegram Connection Error: {e}")
+    except Exception as e:
+        print(f"❌ Unknown Error in send_tg: {e}")
 
-# Fungsi Kirim untuk Bot Monitor
-def send_tg_monitor(text, with_inline_keyboard=False, target_chat_id=None):
-    chat_id = target_chat_id if target_chat_id is not None else CHAT_MONITOR_ID
-    send_tg_generic(BOT_MONITOR_TOKEN, chat_id, text, with_inline_keyboard)
-
-# Fungsi Kirim untuk Bot User
-def send_tg_user(text, chat_id, with_inline_keyboard=False):
-    send_tg_generic(BOT_USER_TOKEN, chat_id, text, with_inline_keyboard)
-
-def send_photo_tg_monitor(photo_path, caption="", target_chat_id=None):
-    chat_id_to_use = target_chat_id if target_chat_id is not None else CHAT_MONITOR_ID
-    if not BOT_MONITOR_TOKEN or not chat_id_to_use: return False
-    url = f"https://api.telegram.org/bot{BOT_MONITOR_TOKEN}/sendPhoto"
+def send_photo_tg(photo_path, caption="", target_chat_id=None):
+    chat_id_to_use = target_chat_id if target_chat_id is not None else CHAT
+    if not BOT or not chat_id_to_use:
+        print("❌ Telegram config missing (BOT or CHAT ID). Cannot send photo.")
+        return False
+    url = f"https://api.telegram.org/bot{BOT}/sendPhoto"
     try:
         with open(photo_path, 'rb') as photo_file:
             files = {'photo': photo_file}
             data = {'chat_id': chat_id_to_use, 'caption': caption, 'parse_mode': 'HTML'}
             response = requests.post(url, files=files, data=data, timeout=20)
-        return response.ok
-    except Exception as e:
-        print(f"❌ Unknown Error in send_photo_tg_monitor: {e}")
+        if not response.ok:
+            print(f"⚠️ Telegram Photo API Error ({response.status_code}): {response.text}")
+            return False
+        return True
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Telegram Connection Error while sending photo: {e}")
         return False
-    finally:
-        if os.path.exists(photo_path): os.remove(photo_path)
-
-def update_global_status():
-    global BOT_STATUS
-    global total_sent
-    uptime_seconds = time.time() - start
-    
-    BOT_STATUS["uptime"] = f"{int(uptime_seconds//3600)}h {int((uptime_seconds%3600)//60)}m {int(uptime_seconds%60)}s"
-    BOT_STATUS["total_otps_sent"] = total_sent
-    BOT_STATUS["last_check"] = datetime.now().strftime("%H:%M:%S")
-    BOT_STATUS["cache_size"] = len(otp_filter.cache)
-    BOT_STATUS["status"] = "Running" if BOT_STATUS["monitoring_active"] else "Paused"
-    
-    return BOT_STATUS
-
-
-# ================= User Bot Class =================
-
-class UserBot:
-    def __init__(self, token):
-        self.token = token
-        self.last_id = 0
-    
-    async def run(self):
-        print("🚀 User Bot (Pelayanan) started...")
-        while True:
-            await self._check_updates()
-            await asyncio.sleep(1) 
-
-    async def _check_updates(self):
-        global USER_ALLOWED_IDS
-        url = f"https://api.telegram.org/bot{self.token}/getUpdates?offset={self.last_id+1}&timeout=10"
-        
-        try:
-            response = requests.get(url, timeout=15)
-            upd = response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"❌ User Bot Error during getUpdates: {e}")
-            return
-        
-        for u in upd.get("result", []):
-            self.last_id = u["update_id"]
-            msg = u.get("message", {})
-            text = msg.get("text", "")
-            user_id = msg.get("from", {}).get("id")
-            chat_id = msg.get("chat", {}).get("id")
-
-            if not chat_id: continue 
-
-            if text == "/start":
-                if user_id not in USER_ALLOWED_IDS:
-                    USER_ALLOWED_IDS.add(user_id)
-                    save_users(USER_ALLOWED_IDS) # SIMPAN ID USER BARU
-                    
-                    # FEEDBACK USER BARU
-                    welcome_message = (
-                        f"✅ Selamat datang! ID Anda (`{user_id}`) telah terdaftar dan tersimpan.\n\n"
-                        f"Untuk memulai, kirimkan **prefix nomor telepon** yang ingin Anda dapatkan "
-                        f"(minimal 6 digit).\n\n"
-                        f"Contoh:\n"
-                        f"• `+2246543XXX`\n"
-                        f"• `85712345XX`"
-                    )
-                    send_tg_user(welcome_message, chat_id)
-                    send_tg_monitor(f"👤 **New User Registered**: ID `{user_id}`", with_inline_keyboard=False)
-                else:
-                    # FEEDBACK USER LAMA
-                    welcome_message_back = (
-                        f"👋 Halo kembali! ID Anda (`{user_id}`) sudah terdaftar.\n\n"
-                        f"Silakan kirimkan **prefix nomor telepon** yang ingin Anda dapatkan.\n"
-                        f"Contoh: `+2246543XXX`"
-                    )
-                    send_tg_user(welcome_message_back, chat_id)
-            
-            elif user_id in USER_ALLOWED_IDS and (text.startswith('+') or text.isdigit()):
-                input_number = clean_phone_number(text)
-                if len(input_number.replace('+', '')) < 6:
-                    send_tg_user("⚠️ Format nomor tidak valid. Minimal 6 digit. Contoh: `+2246543XXX`", chat_id)
-                    continue
-                
-                # Masukkan request ke cache, menggunakan prefix sebagai key
-                USER_REQUEST_CACHE[input_number] = user_id 
-                
-                # Eksekusi Get Number di Browser secara asinkron
-                if GLOBAL_ASYNC_LOOP:
-                     asyncio.run_coroutine_threadsafe(
-                        monitor.get_number_on_page(input_number), 
-                        GLOBAL_ASYNC_LOOP
-                    )
-                else:
-                    send_tg_user("❌ Bot monitoring belum siap. Coba lagi sebentar.", chat_id)
-                    continue
-
-                print(f"✅ User {user_id} requested number: {input_number}")
-                send_tg_user(f"⏳ Nomor `{input_number}` sedang diproses. Mohon tunggu notifikasi.", chat_id)
-            
-            else:
-                if user_id not in USER_ALLOWED_IDS:
-                    send_tg_user("Mohon ketik /start terlebih dahulu.", chat_id)
-
+    except Exception as e:
+        print(f"❌ Unknown Error in send_photo_tg: {e}")
+        return False
 
 # ================= Scraper & Monitor Class =================
+URL = "https://v2.mnitnetwork.com/dashboard/getnum" 
 
 class SMSMonitor:
     def __init__(self, url=URL):
@@ -379,6 +250,7 @@ class SMSMonitor:
         self.page = None
 
     async def initialize(self):
+        # Pyppeteer connect dengan Puppeteer/Chrome yang berjalan di 9222
         self.browser = await connect(browserURL="http://127.0.0.1:9222")
         pages = await self.browser.pages()
         page = None
@@ -391,43 +263,6 @@ class SMSMonitor:
             await page.goto(self.url, {'waitUntil': 'networkidle0'})
         self.page = page
         print("✅ Browser page connected successfully.")
-    
-    async def get_number_on_page(self, number_prefix):
-        """Mengisi input dan klik tombol 'Get Numbers'."""
-        if not self.page: await self.initialize()
-
-        # 1. Refresh dulu
-        try:
-            print(f"-> Browser Action: Refreshing page...")
-            await self.page.reload({'waitUntil': 'networkidle0'})
-            await asyncio.sleep(1) 
-        except Exception as e:
-            print(f"❌ Gagal Refresh sebelum input: {e}")
-
-        try:
-            # 2. Input Nomor (Selector: input[name="numberrange"])
-            print(f"-> Browser Action: Typing {number_prefix}...")
-            # Menghapus teks lama sebelum mengetik
-            await self.page.evaluate('document.querySelector("input[name=\\"numberrange\\"]").value = ""')
-            await self.page.type('input[name="numberrange"]', number_prefix, {'delay': 50})
-            
-            # 3. Klik Tombol (Selector: #getNumberBtn)
-            print(f"-> Browser Action: Clicking Get Numbers...")
-            await self.page.click('#getNumberBtn')
-            
-            # Tunggu sebentar agar status "pending" muncul
-            await asyncio.sleep(3) 
-
-            print(f"✅ Number {number_prefix} successfully requested on the page.")
-
-        except Exception as e:
-            error_msg = f"❌ Gagal input/klik tombol di browser: {e.__class__.__name__}: {e}"
-            print(error_msg)
-            # Notifikasi kegagalan ke user
-            if number_prefix in USER_REQUEST_CACHE:
-                user_id = USER_REQUEST_CACHE.pop(number_prefix)
-                send_tg_user(f"❌ Gagal memproses nomor `{number_prefix}`. Coba lagi.", user_id)
-
 
     async def fetch_sms(self):
         if not self.page: await self.initialize()
@@ -435,34 +270,6 @@ class SMSMonitor:
         html = await self.page.content()
         soup = BeautifulSoup(html, "html.parser")
         messages = []
-
-        # === Logika Baru: Memproses Status Pending (Untuk Notifikasi User) ===
-        pending_rows = soup.find_all("span", class_="status-pending")
-        
-        for p_span in pending_rows:
-            row = p_span.find_parent("tr")
-            if not row: continue
-            
-            phone_span = row.find("span", class_="phone-number")
-            phone = clean_phone_number(phone_span.get_text(strip=True) if phone_span else None)
-            
-            if phone:
-                # Cek apakah nomor ini diminta oleh user
-                for prefix, user_id in list(USER_REQUEST_CACHE.items()): 
-                    if phone.startswith(prefix) or phone.startswith(prefix.replace('+', '')):
-                        
-                        # Kirim notifikasi ke user!
-                        message = f"✅ Nomor **{phone}** telah berhasil *di-request* dan berstatus **PENDING**."
-                        message += "\n\nMenunggu OTP..."
-                        send_tg_user(message, user_id)
-                        
-                        print(f"-> NOTIFY PENDING: User {user_id} notified about pending number: {phone}")
-                        
-                        # Hapus dari cache USER_REQUEST_CACHE 
-                        del USER_REQUEST_CACHE[prefix]
-                        break 
-        
-        # === Logika Lama: Mengambil Pesan Sukses (OTP) ===
 
         rows = soup.find_all("tr")
 
@@ -485,7 +292,8 @@ class SMSMonitor:
                 else:
                     raw_message_clean = raw_message_original
                 
-                # C. OTP
+                
+                # C. OTP 
                 otp_raw_text_parts = [t.strip() for t in otp_badge_span.contents if t.name is None and t.strip()]
                 otp = otp_raw_text_parts[0] if otp_raw_text_parts else None 
                 
@@ -517,43 +325,94 @@ class SMSMonitor:
                     })
         return messages
     
+    # FUNGSI SOFT REFRESH DAN CLEANUP DINONAKTIFKAN KARENA REFRESH HANYA MANUAL
+    async def soft_refresh(self): 
+        if not self.page: 
+            try: await self.initialize()
+            except Exception as e:
+                print(f"❌ Error during initial connect for soft refresh: {e}")
+                return
+
+        try:
+            print("🔄 Performing soft page refresh...")
+            await self.page.reload({'waitUntil': 'networkidle0'})
+            print("✅ Soft refresh complete.")
+        except Exception as e:
+            print(f"❌ Error during soft refresh: {e}")
+
     async def refresh_and_screenshot(self, admin_chat_id): 
+        if not self.page:
+            try: await self.initialize()
+            except Exception as e:
+                print(f"❌ Error during initial connect for refresh: {e}")
+                send_tg(f"⚠️ **Error Refresh/Screenshot**: Gagal inisialisasi koneksi browser. `{e.__class__.__name__}: {e}`", target_chat_id=admin_chat_id)
+                return False
+
         screenshot_filename = f"screenshot_{int(time.time())}.png"
         try:
-            if not self.page: await self.initialize()
             print("🔄 Performing page refresh...")
             await self.page.reload({'waitUntil': 'networkidle0'}) 
             print(f"📸 Taking screenshot: {screenshot_filename}")
+            await asyncio.sleep(1) 
             await self.page.screenshot({'path': screenshot_filename, 'fullPage': True})
             print("📤 Sending screenshot to Admin Telegram...")
-            caption = f"✅ Page Refreshed successfully at {datetime.now().strftime('%H:%M:%S')}\n\n<i>Pesan OTP di halaman telah dihapus.</i>"
-            success = send_photo_tg_monitor(screenshot_filename, caption, target_chat_id=admin_chat_id)
+            caption = f"✅ Page Refreshed successfully at {datetime.now().strftime('%H:%M:%S')}\n\n<i>Pesan OTP di halaman telah dihapus (manual refresh).</i>"
+            success = send_photo_tg(screenshot_filename, caption, target_chat_id=admin_chat_id)
             return success
         except Exception as e:
             print(f"❌ Error during refresh/screenshot: {e}")
-            send_tg_monitor(f"⚠️ **Error Refresh/Screenshot**: `{e.__class__.__name__}: {e}`", target_chat_id=admin_chat_id)
+            send_tg(f"⚠️ **Error Refresh/Screenshot**: `{e.__class__.__name__}: {e}`", target_chat_id=admin_chat_id)
             return False
         finally:
             if os.path.exists(screenshot_filename):
                 os.remove(screenshot_filename)
                 print(f"🗑️ Cleaned up {screenshot_filename}")
+    
+    async def fetch_and_process_once(self, admin_chat_id):
+        pass
 
 monitor = SMSMonitor()
+
+# ================= Status Global dan Fungsi Update =================
+start = time.time()
+total_sent = 0
+
+BOT_STATUS = {
+    "status": "Initializing...",
+    "uptime": "--",
+    "total_otps_sent": 0,
+    "last_check": "Never",
+    "cache_size": 0,
+    "monitoring_active": True
+}
+
+def update_global_status():
+    global BOT_STATUS
+    global total_sent
+    uptime_seconds = time.time() - start
+    
+    BOT_STATUS["uptime"] = f"{int(uptime_seconds//3600)}h {int((uptime_seconds%3600)//60)}m {int(uptime_seconds%60)}s"
+    BOT_STATUS["total_otps_sent"] = total_sent
+    BOT_STATUS["last_check"] = datetime.now().strftime("%H:%M:%S")
+    BOT_STATUS["cache_size"] = len(otp_filter.cache)
+    BOT_STATUS["status"] = "Running" if BOT_STATUS["monitoring_active"] else "Paused"
+    
+    return BOT_STATUS
 
 # ================= FUNGSI UTAMA LOOP DAN COMMAND CHECK =================
 
 def check_cmd(stats):
-    global LAST_ID_MONITOR
+    global LAST_ID
     if ADMIN_ID is None: return
 
     try:
         upd = requests.get(
-            f"https://api.telegram.org/bot{BOT_MONITOR_TOKEN}/getUpdates?offset={LAST_ID_MONITOR+1}",
+            f"https://api.telegram.org/bot{BOT}/getUpdates?offset={LAST_ID+1}",
             timeout=15  
         ).json()
 
         for u in upd.get("result",[]):
-            LAST_ID_MONITOR = u["update_id"]
+            LAST_ID = u["update_id"]
             msg = u.get("message",{})
             text = msg.get("text","")
             user_id = msg.get("from", {}).get("id")
@@ -562,22 +421,18 @@ def check_cmd(stats):
             if user_id == ADMIN_ID:
                 if text == "/status":
                     requests.post(
-                        f"https://api.telegram.org/bot{BOT_MONITOR_TOKEN}/sendMessage",
+                        f"https://api.telegram.org/bot{BOT}/sendMessage",
                         data={'chat_id': chat_id, 'text': get_status_message(stats), 'parse_mode': 'HTML'}
                     )
                 elif text == "/refresh":
-                    send_tg_monitor("⏳ Executing page refresh and screenshot...", with_inline_keyboard=False, target_chat_id=chat_id)
+                    send_tg("⏳ Executing page refresh and screenshot...", with_inline_keyboard=False, target_chat_id=chat_id)
                     if GLOBAL_ASYNC_LOOP:
                         asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(admin_chat_id=chat_id), GLOBAL_ASYNC_LOOP)
                     else:
-                        send_tg_monitor("❌ Loop error: Global loop not set.", target_chat_id=chat_id)
-                elif text == "/clearcache":
-                    otp_filter.cache = {}
-                    otp_filter._save()
-                    send_tg_monitor(f"✅ OTP Cache cleared. New size: {len(otp_filter.cache)}.", target_chat_id=chat_id)
+                        send_tg("❌ Loop error: Global loop not set.", target_chat_id=chat_id)
 
     except requests.exceptions.RequestException as e:
-        print(f"❌ Error during getUpdates (Monitor Bot): {e}")
+        print(f"❌ Error during getUpdates: {e}")
     except Exception as e:
         print(f"❌ Unknown Error in check_cmd: {e}")
 
@@ -589,8 +444,8 @@ async def monitor_sms_loop():
     try:
         await monitor.initialize()
     except Exception as e:
-        print(f"FATAL ERROR: Failed to initialize SMSMonitor. {e}")
-        send_tg_monitor("🚨 **FATAL ERROR**: Gagal terhubung ke Chrome/Pyppeteer. Pastikan Chrome berjalan dengan `--remote-debugging-port=9222`.")
+        print(f"FATAL ERROR: Failed to initialize SMSMonitor (Pyppeteer/Browser connection). {e}")
+        send_tg("🚨 **FATAL ERROR**: Gagal terhubung ke Chrome/Pyppeteer. Pastikan Chrome berjalan dengan `--remote-debugging-port=9222`.")
         BOT_STATUS["status"] = "FATAL ERROR"
         return 
 
@@ -599,88 +454,110 @@ async def monitor_sms_loop():
     while True:
         try:
             if BOT_STATUS["monitoring_active"]:
-                msgs = await monitor.fetch_sms() 
-                new = otp_filter.filter(msgs)
+                
+                msgs = await monitor.fetch_sms()
+                new, failed = otp_filter.filter(msgs) 
+
+                if failed:
+                    for otp_data in failed:
+                        phone = mask_phone_number(otp_data.get('phone', 'N/A'))
+                        service = otp_data.get('service', 'Unknown')
+                        print(f"⚠️ FAILED/DUPLICATE OTP: {otp_data['otp']} for {phone} ({service}) - Already in permanent cache.")
 
                 if new:
                     print(f"✅ Found {len(new)} new OTP(s). Sending to Telegram one by one with 2-second delay...")
                     
                     for i, otp_data in enumerate(new):
-                        # Kirim ke Channel Monitor
-                        send_tg_monitor(format_otp_message(otp_data), with_inline_keyboard=True)
+                        message_text = format_otp_message(otp_data)
+                        print(f"   -> Sending OTP {i+1}/{len(new)}: {otp_data['otp']} for {otp_data['phone']}")
+                        
+                        send_tg(message_text, with_inline_keyboard=True)
                         total_sent += 1
                         
                         await asyncio.sleep(2) 
-                    
-                    if ADMIN_ID is not None:
-                        print("⚙️ Executing automatic refresh and screenshot to admin...")
-                        await monitor.refresh_and_screenshot(admin_chat_id=ADMIN_ID)
-                    else:
-                        print("⚠️ WARNING: ADMIN_ID not set. Skipping automatic refresh/screenshot.")
             else:
                 print("⏸️ Monitoring paused.")
+
 
         except Exception as e:
             error_message = f"Error during fetch/send: {e.__class__.__name__}: {e}"
             print(error_message)
 
         stats = update_global_status()
-        # Jalankan check_cmd di thread karena menggunakan requests sinkronus
-        Thread(target=check_cmd, args=(stats,)).start() 
+        check_cmd(stats)
         
+        # Delay utama 5 detik
         await asyncio.sleep(5) 
 
-# ================= FLASK WEB SERVER =================
+# ================= FLASK WEB SERVER UNTUK API DAN DASHBOARD =================
 
 app = Flask(__name__, template_folder='templates')
 
+# 1. ROUTE UTAMA (UNTUK DASHBOARD)
 @app.route('/', methods=['GET'])
 def index():
+    """Melayani file dashboard.html."""
     return render_template('dashboard.html')
 
+# 2. ROUTE API (UNTUK DIPANGGIL OLEH JAVASCRIPT DI dashboard.html)
 @app.route('/api/status', methods=['GET'])
 def get_status_json():
+    """Mengembalikan data status bot dalam format JSON."""
     update_global_status() 
     return jsonify(BOT_STATUS)
 
 @app.route('/manual-check', methods=['GET'])
 def manual_check():
+    """Memanggil refresh_and_screenshot di loop asinkron (dipicu dari Dashboard)."""
     if ADMIN_ID is None: return jsonify({"message": "Error: Admin ID not configured for this action."}), 400
-    if GLOBAL_ASYNC_LOOP is None: return jsonify({"message": "Error: Asyncio loop not initialized."}), 500
+    if GLOBAL_ASYNC_LOOP is None:
+        return jsonify({"message": "Error: Asyncio loop not initialized."}), 500
         
     try:
+        # Jalankan coroutine di event loop utama
         asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(admin_chat_id=ADMIN_ID), GLOBAL_ASYNC_LOOP)
         return jsonify({"message": "Halaman MNIT Network Refresh & Screenshot sedang dikirim ke Admin Telegram."})
+    except RuntimeError as e:
+        return jsonify({"message": f"Fatal Error: Asyncio loop issue ({e.__class__.__name__}). Cek log RDP Anda."}), 500
     except Exception as e:
-        return jsonify({"message": f"External Error: Gagal menjalankan refresh: {e.__class__.__name__}"}), 500
+        return jsonify({"message": f"External Error: Gagal menjalankan refresh. Cek log RDP Anda: {e.__class__.__name__}"}), 500
 
 @app.route('/telegram-status', methods=['GET'])
 def send_telegram_status_route():
+    """Memanggil fungsi untuk mengirim status ke Telegram."""
     if ADMIN_ID is None: return jsonify({"message": "Error: Admin ID not configured."}), 400
+    
     stats_msg = get_status_message(update_global_status())
-    send_tg_monitor(stats_msg, target_chat_id=ADMIN_ID)
+    send_tg(stats_msg, target_chat_id=ADMIN_ID)
+    
     return jsonify({"message": "Status sent to Telegram Admin."})
 
 @app.route('/clear-cache', methods=['GET'])
 def clear_otp_cache_route():
+    """Membersihkan cache OTP secara manual (untuk menghapus cache permanen)."""
     global otp_filter
     otp_filter.cache = {}
     otp_filter._save()
+    
     update_global_status() 
     return jsonify({"message": f"OTP Cache cleared. New size: {BOT_STATUS['cache_size']}."})
 
 @app.route('/test-message', methods=['GET'])
 def test_message_route():
+    """Mengirim pesan tes ke Telegram menggunakan format OTP."""
+    # Pesan Tes yang meniru format terbersih
     test_data = {
         "otp": "999999",
         "phone": "+2250150086627",
         "service": "MNIT Test",
         "range": "Ivory Coast",
         "timestamp": datetime.now().strftime("%H:%M:%S"),
-        "raw_message": "FB:&lt;#&gt;999999 adalah kode konfirmasi. Pesan Penuh."
+        "raw_message": "FB-999999 adalah kode konfirmasi Facebook anda (Pesan Tes) Penuh. Jangan menggunakan kode ini."
     }
+    
     test_msg = format_otp_message(test_data).replace("🔐 <b>New OTP Received</b>", "🧪 <b>TEST MESSAGE FROM DASHBOARD</b>")
-    send_tg_monitor(test_msg)
+    
+    send_tg(test_msg)
     return jsonify({"message": "Test message sent to main channel."})
 
 @app.route('/start-monitor', methods=['GET'])
@@ -701,8 +578,8 @@ def run_flask():
     port = int(os.environ.get('PORT', 5000))
     
     global GLOBAL_ASYNC_LOOP
-    # Pastikan loop diatur untuk thread Flask 
     if GLOBAL_ASYNC_LOOP and not asyncio._get_running_loop():
+        # Mengatur loop event untuk Flask thread jika belum diatur
         asyncio.set_event_loop(GLOBAL_ASYNC_LOOP) 
         print(f"✅ Async loop successfully set for Flask thread: {current_thread().name}")
         
@@ -711,18 +588,19 @@ def run_flask():
     app.run(host='127.0.0.1', port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
-    if not all([BOT_MONITOR_TOKEN, CHAT_MONITOR_ID, BOT_USER_TOKEN]):
-        print("FATAL ERROR: Pastikan TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, dan TELEGRAM_BOT_TOKEN_USER ada di file .env.")
+    if not BOT or not CHAT:
+        print("FATAL ERROR: Pastikan TELEGRAM_BOT_TOKEN dan TELEGRAM_CHAT_ID ada di file .env.")
     else:
-        print("Starting Multi-Bot SMS Monitor and User Service...")
+        print("Starting SMS Monitor Bot and Flask API...")
         
-        otp_filter = OTPFilter() # Inisialisasi Filter
-        
-        # Muat user yang sudah terdaftar dari file
-        USER_ALLOWED_IDS = load_users()
-        print(f"✅ Loaded {len(USER_ALLOWED_IDS)} authorized users from {USER_FILE}.")
+        print("\n=======================================================")
+        print("     ⚠️  PENTING: JALANKAN NGROK DI TERMINAL LAIN  ⚠️")
+        print("     Setelah bot ini running, buka terminal baru dan:")
+        print("     ngrok http 5000")
+        print("=======================================================\n")
 
         try:
+            # Gunakan get_event_loop() jika ada, atau buat yang baru.
             loop = asyncio.get_event_loop()
         except RuntimeError:
             loop = asyncio.new_event_loop()
@@ -736,21 +614,11 @@ if __name__ == "__main__":
         flask_thread.start()
         
         # 2. Kirim Pesan Aktivasi Telegram 
-        send_tg_monitor("✅ <b>[Monitor Bot] ACTIVE. Monitoring is RUNNING.</b>", with_inline_keyboard=False)
-        if ADMIN_ID:
-            send_tg_user("✅ <b>[User Bot] ACTIVE. Ready to accept number requests.</b>", chat_id=ADMIN_ID)
-
-        # 3. Inisialisasi dan Mulai Bot
-        user_bot_instance = UserBot(BOT_USER_TOKEN)
+        send_tg("✅ <b>BOT ACTIVE MONITORING IS RUNNING.</b>", with_inline_keyboard=False)
         
-        # Menjalankan dua loop bot secara konkuren (bersamaan)
+        # 3. Mulai loop asinkron monitoring
         try:
-            loop.run_until_complete(
-                asyncio.gather(
-                    monitor_sms_loop(), # Bot Monitor
-                    user_bot_instance.run() # Bot Pelayanan User
-                )
-            )
+            loop.run_until_complete(monitor_sms_loop())
         except KeyboardInterrupt:
             print("Bot shutting down...")
         finally:
