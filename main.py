@@ -1,7 +1,7 @@
 import asyncio
 from pyppeteer import connect
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timezone # <--- PERUBAHAN: Import timezone
 import re
 import json
 import os
@@ -20,7 +20,7 @@ from flask import Flask, jsonify, render_template
 load_dotenv()
 
 # ================= Konstanta Telegram untuk Tombol =================
-TELEGRAM_BOT_LINK = "https://t.me/myzuraisgoodbot" # <-- MODIFIKASI: Link baru
+TELEGRAM_BOT_LINK = "https://t.me/myzuraisgoodbot"
 TELEGRAM_ADMIN_LINK = "https://t.me/Imr1d"
 
 # ================= Telegram Configuration (Loaded from .env) =================
@@ -120,7 +120,6 @@ def format_otp_message(otp_data: Dict[str, Any]) -> str:
     # Melakukan escaping HTML pada pesan penuh agar Telegram tidak error membaca tag HTML
     full_message_escaped = full_message.replace('<', '&lt;').replace('>', '&gt;') 
     
-    # <-- MODIFIKASI: Mengubah label dan menambahkan emoji -->
     return f"""🔐 <b>New OTP Received</b>
 
 🌍 Country: <b>{range_text} {emoji}</b>
@@ -140,16 +139,12 @@ def extract_otp_from_text(text):
     for p in patterns:
         m = re.search(p, text, re.I)
         if m:
-            # Grup 1 adalah nilai OTP yang ditangkap oleh regex
             matched_otp = m.group(1) if len(m.groups()) >= 1 else m.group(0)
             
-            # Pengecekan keamanan untuk 4 digit (agar tidak salah mengira tahun sebagai OTP)
             if len(matched_otp) == 4:
                 try:
-                    # Jika 4 digit dan bukan tahun 2000-2099, ambil.
                     if 2000 <= int(matched_otp) <= 2099: continue 
                 except ValueError:
-                    # Jika bukan angka, lanjut ke pola berikutnya
                     continue 
 
             return matched_otp
@@ -173,19 +168,23 @@ def get_status_message(stats):
 📨 Total OTPs Sent: <b>{stats['total_otps_sent']}</b>
 🔍 Last Check: {stats['last_check']}
 💾 Cache Size: {stats['cache_size']} items
+📅 Last Cache Reset (GMT): {stats['last_cleanup_gmt_date']}
 
 <i>Bot is running</i>"""
 
-# ================= OTP Filter Class (MODIFIED) =================
+# ================= OTP Filter Class (MODIFIED FOR DAILY GMT CLEANUP) =================
 
 class OTPFilter:
-    def __init__(self, file='otp_cache.json', expire=30):
+    
+    CLEANUP_KEY = '__LAST_CLEANUP_GMT__' # Kunci metadata khusus
+
+    def __init__(self, file='otp_cache.json'): 
         self.file = file
-        self.expire = expire
         self.cache = self._load()
-        # Mendorong cleanup saat inisialisasi untuk membuang entri kadaluarsa
+        # Ambil tanggal pembersihan terakhir dari cache, default ke 19700101 jika belum ada
+        self.last_cleanup_date_gmt = self.cache.pop(self.CLEANUP_KEY, '19700101') 
         self._cleanup() 
-        print(f"✅ OTP Cache loaded. Size after cleanup: {len(self.cache)} items.")
+        print(f"✅ OTP Cache loaded. Size after cleanup: {len(self.cache)} items. Last cleanup GMT: {self.last_cleanup_date_gmt}")
         
     def _load(self) -> Dict[str, Dict[str, Any]]:
         if os.path.exists(self.file):
@@ -201,32 +200,41 @@ class OTPFilter:
                 return {}
         return {}
         
-    def _save(self): json.dump(self.cache, open(self.file,'w'), indent=2)
+    def _save(self): 
+        # Tambahkan metadata sebelum menyimpan
+        temp_cache = self.cache.copy()
+        temp_cache[self.CLEANUP_KEY] = self.last_cleanup_date_gmt
+        json.dump(temp_cache, open(self.file,'w'), indent=2)
     
     def _cleanup(self):
-        now = datetime.now()
-        dead = []
-        for k,v in self.cache.items():
-            try:
-                t = datetime.fromisoformat(v['timestamp'])
-                # Hapus jika timestamp sudah lewat batas expire (30 menit default)
-                if (now-t).total_seconds() > self.expire*60: dead.append(k)
-            except: 
-                # Jika format timestamp salah, hapus juga
-                dead.append(k)
-        for k in dead: del self.cache[k]
-        self._save() 
+        """Membersihkan cache berdasarkan pergantian hari GMT (setelah 23:59:59 GMT)."""
         
-    # <-- MODIFIKASI: Kunci cache hanya menggunakan OTP (nilai 'otp') -->
+        # Ambil tanggal hari ini di zona waktu GMT (UTC)
+        now_gmt = datetime.now(timezone.utc).strftime('%Y%m%d')
+        
+        # Logika pembersihan: Jika tanggal GMT sekarang lebih besar dari tanggal pembersihan terakhir
+        if now_gmt > self.last_cleanup_date_gmt:
+            
+            # --- Bersihkan Cache ---
+            print(f"🚨 Daily OTP cache cleanup triggered. Last cleanup: {self.last_cleanup_date_gmt}, Current GMT day: {now_gmt}")
+            self.cache = {} 
+            # Perbarui tanggal pembersihan terakhir
+            self.last_cleanup_date_gmt = now_gmt
+            
+            # Simpan perubahan
+            self._save()
+        else:
+            # Jika belum saatnya bersih, hanya simpan status cache saat ini
+            self._save()
+        
     def key(self, d: Dict[str, Any]) -> str: 
         """Menghasilkan kunci cache hanya dari nilai OTP."""
         return str(d.get('otp'))
     
     def is_dup(self, d: Dict[str, Any]) -> bool:
-        """Memeriksa apakah OTP sudah ada di cache."""
-        self._cleanup() 
+        """Memeriksa apakah OTP sudah ada di cache dan melakukan cleanup jika sudah ganti hari."""
+        self._cleanup() # Panggil cleanup di setiap pemeriksaan duplikat
         key = self.key(d)
-        # Jika key adalah None atau 'None' karena tidak ada OTP, anggap bukan duplikat.
         if not key or key == 'None': return False 
         return key in self.cache
         
@@ -234,6 +242,7 @@ class OTPFilter:
         """Menambahkan OTP ke cache."""
         key = self.key(d)
         if not key or key == 'None': return
+        # Menyimpan timestamp agar format file json tetap konsisten (walaupun tidak digunakan untuk expire)
         self.cache[key] = {'timestamp':datetime.now().isoformat()} 
         self._save()
         
@@ -241,14 +250,13 @@ class OTPFilter:
         """Memfilter list pesan, hanya menyertakan yang bukan duplikat dan menambahkannya ke cache."""
         out = []
         for d in lst:
-            # Hanya proses jika ada OTP dan nomor telepon
             if d.get('otp') and d.get('phone') != 'N/A':
                 if not self.is_dup(d):
                     out.append(d)
                     self.add(d) # Tambahkan ke cache setelah lolos filter
         return out
 
-otp_filter = OTPFilter()
+otp_filter = OTPFilter() # Tidak perlu parameter expire lagi
 
 # ================= Telegram Functionality =================
 
@@ -342,7 +350,6 @@ class SMSMonitor:
                 raw_message_original = copy_icon.get('data-sms', 'N/A') if copy_icon and copy_icon.get('data-sms') else otp_badge_span.get_text(strip=True)
                 
                 # LOGIKA PENGAMBILAN PESAN PENUH MENTAH 
-                # Biasanya, pesan asli di mnitnetwork adalah 'SERVICE: Pesan penuh'
                 if ':' in raw_message_original and raw_message_original != 'N/A':
                     raw_message_clean = raw_message_original.split(':', 1)[1].strip()
                 else:
@@ -350,11 +357,9 @@ class SMSMonitor:
                 
                 
                 # C. OTP 
-                # 1. Coba ambil dari teks langsung di dalam span (tanpa tag anak)
                 otp_raw_text_parts = [t.strip() for t in otp_badge_span.contents if t.name is None and t.strip()]
                 otp = otp_raw_text_parts[0] if otp_raw_text_parts and otp_raw_text_parts[0].isdigit() else None 
                 
-                # 2. Jika gagal/bukan digit, gunakan fungsi ekstraksi yang fleksibel
                 if not otp:
                     otp_full_text = otp_badge_span.get_text(strip=True, separator=' ')
                     otp = extract_otp_from_text(otp_full_text)
@@ -440,7 +445,8 @@ BOT_STATUS = {
     "total_otps_sent": 0,
     "last_check": "Never",
     "cache_size": 0,
-    "monitoring_active": True
+    "monitoring_active": True,
+    "last_cleanup_gmt_date": "N/A" # Tambahan untuk status
 }
 
 def update_global_status():
@@ -452,7 +458,9 @@ def update_global_status():
     BOT_STATUS["total_otps_sent"] = total_sent
     BOT_STATUS["last_check"] = datetime.now().strftime("%H:%M:%S")
     BOT_STATUS["cache_size"] = len(otp_filter.cache)
+    BOT_STATUS["monitoring_active"] = BOT_STATUS["monitoring_active"] # Pertahankan nilai
     BOT_STATUS["status"] = "Running" if BOT_STATUS["monitoring_active"] else "Paused"
+    BOT_STATUS["last_cleanup_gmt_date"] = otp_filter.last_cleanup_date_gmt # Ambil dari filter
     
     return BOT_STATUS
 
@@ -524,7 +532,7 @@ async def monitor_sms_loop():
                 new = otp_filter.filter(msgs)
 
                 if new:
-                    print(f"✅ Found {len(new)} new OTP(s). Sending to Telegram one by one with 2-second delay...")
+                    print(f"✅ Found {len(new)} new OTP(s)}. Sending to Telegram one by one with 2-second delay...")
                     
                     for i, otp_data in enumerate(new):
                         message_text = format_otp_message(otp_data)
@@ -599,18 +607,25 @@ def send_telegram_status_route():
 
 @app.route('/clear-cache', methods=['GET'])
 def clear_otp_cache_route():
-    """Membersihkan cache OTP."""
+    """Membersihkan cache OTP secara manual."""
     global otp_filter
+    
+    # Dapatkan tanggal GMT saat ini
+    now_gmt_str = datetime.now(timezone.utc).strftime('%Y%m%d')
+    
+    # Hapus semua OTP
     otp_filter.cache = {}
+    
+    # Perbarui tanggal pembersihan terakhir
+    otp_filter.last_cleanup_date_gmt = now_gmt_str
     otp_filter._save()
     
     update_global_status() 
-    return jsonify({"message": f"OTP Cache cleared. New size: {BOT_STATUS['cache_size']}."})
+    return jsonify({"message": f"OTP Cache cleared manually. New size: {BOT_STATUS['cache_size']}."})
 
 @app.route('/test-message', methods=['GET'])
 def test_message_route():
     """Mengirim pesan tes ke Telegram menggunakan format OTP."""
-    # <-- MODIFIKASI: Pesan Tes yang meniru format terbersih -->
     test_data = {
         "otp": "123456",
         "phone": "+2250150086627",
@@ -644,7 +659,6 @@ def run_flask():
     
     global GLOBAL_ASYNC_LOOP
     if GLOBAL_ASYNC_LOOP and not asyncio._get_running_loop():
-        # Mengatur loop event untuk Flask thread jika belum diatur
         asyncio.set_event_loop(GLOBAL_ASYNC_LOOP) 
         print(f"✅ Async loop successfully set for Flask thread: {current_thread().name}")
         
