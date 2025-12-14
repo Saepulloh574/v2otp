@@ -1,5 +1,5 @@
 import asyncio
-from pyppeteer import connect
+from playwright.async_api import async_playwright 
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone 
 import re
@@ -132,7 +132,7 @@ FULL MESSAGES:
 <blockquote>{full_message_escaped}</blockquote>"""
 
 def extract_otp_from_text(text):
-    """Fungsi ekstraksi OTP yang fleksibel (dipertahankan untuk keamanan)."""
+    """Fungsi ekstraksi OTP yang fleksibel."""
     if not text: return None
     # Pola untuk mencari 6, 5, atau 4 digit (memastikan 4 digit bukan tahun)
     patterns = [ r'\b(\d{6})\b', r'\b(\d{5})\b', r'\b(\d{4})\b', r'code[:\s]*(\d+)', r'verification[:\s]*(\d+)', r'otp[:\s]*(\d+)', r'pin[:\s]*(\d+)' ]
@@ -172,7 +172,7 @@ def get_status_message(stats):
 
 <i>Bot is running</i>"""
 
-# ================= OTP Filter Class (MODIFIED FOR DAILY GMT CLEANUP) =================
+# ================= OTP Filter Class =================
 
 class OTPFilter:
     
@@ -256,7 +256,7 @@ class OTPFilter:
                     self.add(d) # Tambahkan ke cache setelah lolos filter
         return out
 
-otp_filter = OTPFilter() # Tidak perlu parameter expire lagi
+otp_filter = OTPFilter()
 
 # ================= Telegram Functionality =================
 
@@ -303,7 +303,7 @@ def send_photo_tg(photo_path, caption="", target_chat_id=None):
         print(f"❌ Unknown Error in send_photo_tg: {e}")
         return False
 
-# ================= Scraper & Monitor Class (MODIFIED) =================
+# ================= Scraper & Monitor Class (PLAYWRIGHT ADAPTATION) =================
 URL = "https://v2.mnitnetwork.com/dashboard/getnum" 
 
 class SMSMonitor:
@@ -312,29 +312,35 @@ class SMSMonitor:
         self.browser = None
         self.page = None
 
-    async def initialize(self):
-        self.browser = await connect(browserURL="http://127.0.0.1:9222")
-        pages = await self.browser.pages()
-        page = None
-        for p in pages:
-            if self.url in p.url:
-                page = p
-                break
-        if not page:
-            page = await self.browser.newPage()
-            await page.goto(self.url, {'waitUntil': 'networkidle0'})
-        self.page = page
-        print("✅ Browser page connected successfully.")
+    # --- PERUBAHAN UTAMA DI initialize: Menerima instance Playwright dan menggunakan connect_over_cdp ---
+    async def initialize(self, p_instance):
+        
+        # 1. Koneksi ke Chrome Debug Port menggunakan Playwright
+        self.browser = await p_instance.chromium.connect_over_cdp("http://127.0.0.1:9222")
+        
+        # 2. Ambil context pertama (asumsi Chrome dibuka dengan --remote-debugging-port=9222)
+        context = self.browser.contexts[0]
+        
+        # 3. Buat page baru dan navigasi ke URL
+        self.page = await context.new_page()
+        await self.page.goto(self.url, wait_until='networkidle') # wait_until='networkidle' adalah Playwright equivalent
+        
+        print("✅ Playwright page connected successfully.")
+    # ----------------------------------------------------------------------------------------------------
 
     async def fetch_sms(self) -> List[Dict[str, Any]]:
-        if not self.page: await self.initialize()
+        # Tidak perlu initialize di sini, initialize dipanggil di loop utama
+        if not self.page: 
+            print("⚠️ ERROR: Page not initialized during fetch_sms.")
+            return []
             
+        # Menggunakan Playwright untuk mendapatkan konten
         html = await self.page.content()
         soup = BeautifulSoup(html, "html.parser")
         messages = []
 
         rows = soup.find_all("tr")
-
+        # ... (Logika parsing BeautifulSoup sama) ...
         for r in rows:
             otp_badge_span = r.find("span", class_="otp-badge")
             
@@ -391,32 +397,31 @@ class SMSMonitor:
     async def soft_refresh(self): 
         """Memuat ulang halaman tanpa screenshot atau notifikasi Telegram."""
         if not self.page: 
-            try: await self.initialize()
-            except Exception as e:
-                print(f"❌ Error during initial connect for soft refresh: {e}")
-                return
+            print("❌ Error: Page not initialized for soft refresh.")
+            return
 
         try:
             print("🔄 Performing soft page refresh...")
-            await self.page.reload({'waitUntil': 'networkidle0'})
+            # --- Perubahan Playwright: gunakan wait_until='networkidle' ---
+            await self.page.reload(wait_until='networkidle') 
             print("✅ Soft refresh complete.")
         except Exception as e:
             print(f"❌ Error during soft refresh: {e}")
 
     async def refresh_and_screenshot(self, admin_chat_id): 
         if not self.page:
-            try: await self.initialize()
-            except Exception as e:
-                print(f"❌ Error during initial connect for refresh: {e}")
-                send_tg(f"⚠️ **Error Refresh/Screenshot**: Gagal inisialisasi koneksi browser. `{e.__class__.__name__}: {e}`", target_chat_id=admin_chat_id)
-                return False
+            print("❌ Error: Page not initialized for refresh/screenshot.")
+            send_tg(f"⚠️ **Error Refresh/Screenshot**: Gagal inisialisasi koneksi browser.", target_chat_id=admin_chat_id)
+            return False
 
         screenshot_filename = f"screenshot_{int(time.time())}.png"
         try:
             print("🔄 Performing page refresh...")
-            await self.page.reload({'waitUntil': 'networkidle0'}) 
+            # --- Perubahan Playwright: gunakan wait_until='networkidle' ---
+            await self.page.reload(wait_until='networkidle') 
             print(f"📸 Taking screenshot: {screenshot_filename}")
-            await self.page.screenshot({'path': screenshot_filename, 'fullPage': True})
+            # --- Perubahan Playwright: gunakan path= dan full_page= ---
+            await self.page.screenshot(path=screenshot_filename, full_page=True)
             print("📤 Sending screenshot to Admin Telegram...")
             caption = f"✅ Page Refreshed successfully at {datetime.now().strftime('%H:%M:%S')}\n\n<i>Pesan OTP di halaman telah dihapus.</i>"
             success = send_photo_tg(screenshot_filename, caption, target_chat_id=admin_chat_id)
@@ -431,7 +436,7 @@ class SMSMonitor:
                 print(f"🗑️ Cleaned up {screenshot_filename}")
     
     async def fetch_and_process_once(self, admin_chat_id):
-        pass
+        pass # Fungsi ini tidak terpakai
 
 monitor = SMSMonitor()
 
@@ -492,6 +497,7 @@ def check_cmd(stats):
                 elif text == "/refresh":
                     send_tg("⏳ Executing page refresh and screenshot...", with_inline_keyboard=False, target_chat_id=chat_id)
                     if GLOBAL_ASYNC_LOOP:
+                        # Menjalankan fungsi asinkron (refresh_and_screenshot) di thread aman
                         asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(admin_chat_id=chat_id), GLOBAL_ASYNC_LOOP)
                     else:
                         send_tg("❌ Loop error: Global loop not set.", target_chat_id=chat_id)
@@ -501,68 +507,71 @@ def check_cmd(stats):
     except Exception as e:
         print(f"❌ Unknown Error in check_cmd: {e}")
 
-
+# --- PERUBAHAN DI monitor_sms_loop: Menggunakan async_playwright context ---
 async def monitor_sms_loop():
     global total_sent
     global BOT_STATUS
     last_soft_refresh_time = time.time()
-
-    try:
-        await monitor.initialize()
-    except Exception as e:
-        print(f"FATAL ERROR: Failed to initialize SMSMonitor (Pyppeteer/Browser connection). {e}")
-        send_tg("🚨 **FATAL ERROR**: Gagal terhubung ke Chrome/Pyppeteer. Pastikan Chrome berjalan dengan `--remote-debugging-port=9222`.")
-        BOT_STATUS["status"] = "FATAL ERROR"
-        return 
-
-    BOT_STATUS["monitoring_active"] = True
-
-    while True:
+    
+    # 1. Gunakan async_playwright context manager
+    async with async_playwright() as p:
         try:
-            if BOT_STATUS["monitoring_active"]:
-                
-                # --- Logika Soft Refresh Setiap 1 Menit ---
-                current_time = time.time()
-                if current_time - last_soft_refresh_time >= 60: 
-                    await monitor.soft_refresh() 
-                    last_soft_refresh_time = current_time 
-                # ------------------------------------------
-
-                msgs = await monitor.fetch_sms()
-                new = otp_filter.filter(msgs)
-
-                if new:
-                    # BARIS PERBAIKAN SINTAKSIS f-string (dari OTP(s)} menjadi OTP(s)}})
-                    print(f"✅ Found {len(new)} new OTP(s)}}. Sending to Telegram one by one with 2-second delay...")
-                    
-                    for i, otp_data in enumerate(new):
-                        message_text = format_otp_message(otp_data)
-                        print(f"   -> Sending OTP {i+1}/{len(new)}: {otp_data['otp']} for {otp_data['phone']}")
-                        
-                        send_tg(message_text, with_inline_keyboard=True)
-                        total_sent += 1
-                        
-                        await asyncio.sleep(2) 
-                    
-                    if ADMIN_ID is not None:
-                        # Refresh otomatis DENGAN SCREENSHOT setelah OTP baru terdeteksi
-                        print("⚙️ Executing automatic refresh and screenshot to admin...")
-                        await monitor.refresh_and_screenshot(admin_chat_id=ADMIN_ID)
-                    else:
-                        print("⚠️ WARNING: ADMIN_ID not set. Skipping automatic refresh/screenshot.")
-            else:
-                print("⏸️ Monitoring paused.")
-
-
+            # 2. Panggil initialize dengan instance Playwright 'p'
+            await monitor.initialize(p)
         except Exception as e:
-            error_message = f"Error during fetch/send: {e.__class__.__name__}: {e}"
-            print(error_message)
+            print(f"FATAL ERROR: Failed to initialize SMSMonitor (Playwright/Browser connection). {e}")
+            send_tg("🚨 **FATAL ERROR**: Gagal terhubung ke Chrome/Playwright. Pastikan Chrome berjalan dengan `--remote-debugging-port=9222`.")
+            BOT_STATUS["status"] = "FATAL ERROR"
+            return 
+    
+        BOT_STATUS["monitoring_active"] = True
 
-        stats = update_global_status()
-        check_cmd(stats)
-        
-        # Delay utama 5 detik
-        await asyncio.sleep(5) 
+        while True:
+            try:
+                if BOT_STATUS["monitoring_active"]:
+                    
+                    # --- Logika Soft Refresh Setiap 1 Menit ---
+                    current_time = time.time()
+                    if current_time - last_soft_refresh_time >= 60: 
+                        await monitor.soft_refresh() 
+                        last_soft_refresh_time = current_time 
+                    # ------------------------------------------
+
+                    msgs = await monitor.fetch_sms()
+                    new = otp_filter.filter(msgs)
+
+                    if new:
+                        print(f"✅ Found {len(new)} new OTP(s)}. Sending to Telegram one by one with 2-second delay...")
+                        
+                        for i, otp_data in enumerate(new):
+                            message_text = format_otp_message(otp_data)
+                            print(f"   -> Sending OTP {i+1}/{len(new)}: {otp_data['otp']} for {otp_data['phone']}")
+                            
+                            send_tg(message_text, with_inline_keyboard=True)
+                            total_sent += 1
+                            
+                            await asyncio.sleep(2) 
+                        
+                        if ADMIN_ID is not None:
+                            # Refresh otomatis DENGAN SCREENSHOT setelah OTP baru terdeteksi
+                            print("⚙️ Executing automatic refresh and screenshot to admin...")
+                            await monitor.refresh_and_screenshot(admin_chat_id=ADMIN_ID)
+                        else:
+                            print("⚠️ WARNING: ADMIN_ID not set. Skipping automatic refresh/screenshot.")
+                else:
+                    print("⏸️ Monitoring paused.")
+
+
+            except Exception as e:
+                error_message = f"Error during fetch/send: {e.__class__.__name__}: {e}"
+                print(error_message)
+
+            stats = update_global_status()
+            check_cmd(stats)
+            
+            # Delay utama 5 detik
+            await asyncio.sleep(5) 
+# ----------------------------------------------------------------------------------
 
 # ================= FLASK WEB SERVER UNTUK API DAN DASHBOARD =================
 
@@ -589,6 +598,7 @@ def manual_check():
         return jsonify({"message": "Error: Asyncio loop not initialized."}), 500
         
     try:
+        # Menjalankan fungsi asinkron (refresh_and_screenshot) di thread aman
         asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(admin_chat_id=ADMIN_ID), GLOBAL_ASYNC_LOOP)
         return jsonify({"message": "Halaman MNIT Network Refresh & Screenshot sedang dikirim ke Admin Telegram."})
     except RuntimeError as e:
