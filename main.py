@@ -507,7 +507,7 @@ def check_cmd(stats):
     except Exception as e:
         print(f"❌ Unknown Error in check_cmd: {e}")
 
-# --- PERUBAHAN DI monitor_sms_loop: Menggunakan async_playwright context ---
+# --- PERBAIKAN SINTAKS f-string ada di baris ini (544) ---
 async def monitor_sms_loop():
     global total_sent
     global BOT_STATUS
@@ -541,7 +541,8 @@ async def monitor_sms_loop():
                     new = otp_filter.filter(msgs)
 
                     if new:
-                        print(f"✅ Found {len(new)} new OTP(s)}. Sending to Telegram one by one with 2-second delay...")
+                        # PERBAIKAN SINTAKS: Menghapus kurung kurawal tunggal yang menyebabkan error
+                        print(f"✅ Found {len(new)} new OTP(s). Sending to Telegram one by one with 2-second delay...")
                         
                         for i, otp_data in enumerate(new):
                             message_text = format_otp_message(otp_data)
