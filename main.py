@@ -34,6 +34,12 @@ except (ValueError, TypeError):
 
 LAST_ID = 0
 
+# ================= Konfigurasi File Path =================
+# FILE INI DISIMPAN DI FOLDER SELEVEL (../get/)
+OTP_SAVE_FOLDER = os.path.join("..", "get")
+OTP_SAVE_FILE = os.path.join(OTP_SAVE_FOLDER, "smc.json")
+# ---------------------------------------------------------
+
 # ================= Global State for Asyncio Loop =================
 GLOBAL_ASYNC_LOOP = None # Variabel global untuk menyimpan event loop utama
 
@@ -172,19 +178,61 @@ def get_status_message(stats):
 
 <i>Bot is running</i>"""
 
+def save_otp_to_json(otp_data: Dict[str, Any]):
+    """
+    Menyimpan data OTP ke file JSON di ../get/smc.json dalam format Array of Objects:
+    [{"Number": "...", "OTP": "...", "FullMessage": "..."}, ...]
+    """
+    
+    # Pastikan folder sudah ada
+    if not os.path.exists(OTP_SAVE_FOLDER):
+        os.makedirs(OTP_SAVE_FOLDER)
+        
+    # --- Format Data Sesuai Permintaan ---
+    data_to_save = {
+        "Number": otp_data.get('phone', 'N/A'),
+        "OTP": otp_data.get('otp', 'N/A'),
+        "FullMessage": otp_data.get('raw_message', 'N/A')
+    }
+    # -------------------------------------
+    
+    try:
+        # 1. Baca data yang sudah ada (jika file ada dan tidak kosong)
+        existing_data = []
+        if os.path.exists(OTP_SAVE_FILE) and os.stat(OTP_SAVE_FILE).st_size > 0:
+            with open(OTP_SAVE_FILE, 'r') as f:
+                try:
+                    # Harapannya data yang sudah ada adalah list/array
+                    existing_data = json.load(f)
+                    if not isinstance(existing_data, list):
+                        existing_data = [] # Reset jika format tidak sesuai
+                except json.JSONDecodeError:
+                    existing_data = [] # Reset jika file korup
+        
+        # 2. Tambahkan data baru
+        existing_data.append(data_to_save)
+        
+        # 3. Tulis kembali seluruh list ke file
+        with open(OTP_SAVE_FILE, 'w') as f:
+            json.dump(existing_data, f, indent=2)
+            
+    except Exception as e:
+        print(f"❌ ERROR: Failed to save OTP to JSON file {OTP_SAVE_FILE}: {e}")
+
 # ================= OTP Filter Class =================
 
 class OTPFilter:
     
     CLEANUP_KEY = '__LAST_CLEANUP_GMT__' # Kunci metadata khusus
 
+    # File cache OTP berada di direktori yang sama dengan main.py
     def __init__(self, file='otp_cache.json'): 
         self.file = file
         self.cache = self._load()
         # Ambil tanggal pembersihan terakhir dari cache, default ke 19700101 jika belum ada
         self.last_cleanup_date_gmt = self.cache.pop(self.CLEANUP_KEY, '19700101') 
         self._cleanup() 
-        print(f"✅ OTP Cache loaded. Size after cleanup: {len(self.cache)} items. Last cleanup GMT: {self.last_cleanup_date_gmt}")
+        print(f"✅ OTP Cache loaded from '{self.file}'. Size after cleanup: {len(self.cache)} items. Last cleanup GMT: {self.last_cleanup_date_gmt}")
         
     def _load(self) -> Dict[str, Dict[str, Any]]:
         if os.path.exists(self.file):
@@ -204,6 +252,7 @@ class OTPFilter:
         # Tambahkan metadata sebelum menyimpan
         temp_cache = self.cache.copy()
         temp_cache[self.CLEANUP_KEY] = self.last_cleanup_date_gmt
+        # Simpan ke otp_cache.json
         json.dump(temp_cache, open(self.file,'w'), indent=2)
     
     def _cleanup(self):
@@ -250,10 +299,11 @@ class OTPFilter:
         """Memfilter list pesan, hanya menyertakan yang bukan duplikat dan menambahkannya ke cache."""
         out = []
         for d in lst:
+            # Pengecekan hanya jika ada OTP dan nomor telepon valid
             if d.get('otp') and d.get('phone') != 'N/A':
                 if not self.is_dup(d):
                     out.append(d)
-                    self.add(d) # Tambahkan ke cache setelah lolos filter
+                    self.add(d) # Tambahkan ke cache setelah lolos filter (SIMPAN KE otp_cache.json)
         return out
 
 otp_filter = OTPFilter()
@@ -312,24 +362,21 @@ class SMSMonitor:
         self.browser = None
         self.page = None
 
-    # --- PERUBAHAN UTAMA DI initialize: Menerima instance Playwright dan menggunakan connect_over_cdp ---
     async def initialize(self, p_instance):
         
         # 1. Koneksi ke Chrome Debug Port menggunakan Playwright
         self.browser = await p_instance.chromium.connect_over_cdp("http://127.0.0.1:9222")
         
-        # 2. Ambil context pertama (asumsi Chrome dibuka dengan --remote-debugging-port=9222)
+        # 2. Ambil context pertama 
         context = self.browser.contexts[0]
         
         # 3. Buat page baru dan navigasi ke URL
         self.page = await context.new_page()
-        await self.page.goto(self.url, wait_until='networkidle') # wait_until='networkidle' adalah Playwright equivalent
+        await self.page.goto(self.url, wait_until='networkidle') 
         
         print("✅ Playwright page connected successfully.")
-    # ----------------------------------------------------------------------------------------------------
 
     async def fetch_sms(self) -> List[Dict[str, Any]]:
-        # Tidak perlu initialize di sini, initialize dipanggil di loop utama
         if not self.page: 
             print("⚠️ ERROR: Page not initialized during fetch_sms.")
             return []
@@ -340,7 +387,6 @@ class SMSMonitor:
         messages = []
 
         rows = soup.find_all("tr")
-        # ... (Logika parsing BeautifulSoup sama) ...
         for r in rows:
             otp_badge_span = r.find("span", class_="otp-badge")
             
@@ -352,7 +398,6 @@ class SMSMonitor:
                 
                 # B. Raw Message (Original & Cleaned)
                 copy_icon = otp_badge_span.find("i", class_="copy-icon")
-                # Mengambil dari 'data-sms' jika ada, jika tidak, fallback ke teks badge
                 raw_message_original = copy_icon.get('data-sms', 'N/A') if copy_icon and copy_icon.get('data-sms') else otp_badge_span.get_text(strip=True)
                 
                 # LOGIKA PENGAMBILAN PESAN PENUH MENTAH 
@@ -402,7 +447,6 @@ class SMSMonitor:
 
         try:
             print("🔄 Performing soft page refresh...")
-            # --- Perubahan Playwright: gunakan wait_until='networkidle' ---
             await self.page.reload(wait_until='networkidle') 
             print("✅ Soft refresh complete.")
         except Exception as e:
@@ -417,10 +461,8 @@ class SMSMonitor:
         screenshot_filename = f"screenshot_{int(time.time())}.png"
         try:
             print("🔄 Performing page refresh...")
-            # --- Perubahan Playwright: gunakan wait_until='networkidle' ---
             await self.page.reload(wait_until='networkidle') 
             print(f"📸 Taking screenshot: {screenshot_filename}")
-            # --- Perubahan Playwright: gunakan path= dan full_page= ---
             await self.page.screenshot(path=screenshot_filename, full_page=True)
             print("📤 Sending screenshot to Admin Telegram...")
             caption = f"✅ Page Refreshed successfully at {datetime.now().strftime('%H:%M:%S')}\n\n<i>Pesan OTP di halaman telah dihapus.</i>"
@@ -434,9 +476,6 @@ class SMSMonitor:
             if os.path.exists(screenshot_filename):
                 os.remove(screenshot_filename)
                 print(f"🗑️ Cleaned up {screenshot_filename}")
-    
-    async def fetch_and_process_once(self, admin_chat_id):
-        pass # Fungsi ini tidak terpakai
 
 monitor = SMSMonitor()
 
@@ -451,7 +490,7 @@ BOT_STATUS = {
     "last_check": "Never",
     "cache_size": 0,
     "monitoring_active": True,
-    "last_cleanup_gmt_date": "N/A" # Tambahan untuk status
+    "last_cleanup_gmt_date": "N/A"
 }
 
 def update_global_status():
@@ -463,9 +502,9 @@ def update_global_status():
     BOT_STATUS["total_otps_sent"] = total_sent
     BOT_STATUS["last_check"] = datetime.now().strftime("%H:%M:%S")
     BOT_STATUS["cache_size"] = len(otp_filter.cache)
-    BOT_STATUS["monitoring_active"] = BOT_STATUS["monitoring_active"] # Pertahankan nilai
+    BOT_STATUS["monitoring_active"] = BOT_STATUS["monitoring_active"] 
     BOT_STATUS["status"] = "Running" if BOT_STATUS["monitoring_active"] else "Paused"
-    BOT_STATUS["last_cleanup_gmt_date"] = otp_filter.last_cleanup_date_gmt # Ambil dari filter
+    BOT_STATUS["last_cleanup_gmt_date"] = otp_filter.last_cleanup_date_gmt 
     
     return BOT_STATUS
 
@@ -507,7 +546,6 @@ def check_cmd(stats):
     except Exception as e:
         print(f"❌ Unknown Error in check_cmd: {e}")
 
-# --- PERBAIKAN SINTAKS f-string ada di baris ini (544) ---
 async def monitor_sms_loop():
     global total_sent
     global BOT_STATUS
@@ -538,13 +576,18 @@ async def monitor_sms_loop():
                     # ------------------------------------------
 
                     msgs = await monitor.fetch_sms()
+                    
+                    # FILTER: Memfilter duplikasi dan MENYIMPAN ke otp_cache.json
                     new = otp_filter.filter(msgs)
 
                     if new:
-                        # PERBAIKAN SINTAKS: Menghapus kurung kurawal tunggal yang menyebabkan error
                         print(f"✅ Found {len(new)} new OTP(s). Sending to Telegram one by one with 2-second delay...")
                         
                         for i, otp_data in enumerate(new):
+                            # --- 1. SIMPAN KE FILE JSON LOKAL (../get/smc.json) ---
+                            save_otp_to_json(otp_data)
+                            
+                            # --- 2. KIRIM KE TELEGRAM ---
                             message_text = format_otp_message(otp_data)
                             print(f"   -> Sending OTP {i+1}/{len(new)}: {otp_data['otp']} for {otp_data['phone']}")
                             
@@ -584,7 +627,7 @@ def index():
     """Melayani file dashboard.html."""
     return render_template('dashboard.html')
 
-# 2. ROUTE API (UNTUK DIPANGGIL OLEH JAVASCRIPT DI dashboard.html)
+# 2. ROUTE API 
 @app.route('/api/status', methods=['GET'])
 def get_status_json():
     """Mengembalikan data status bot dalam format JSON."""
