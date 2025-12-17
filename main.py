@@ -180,8 +180,8 @@ def get_status_message(stats):
 
 def save_otp_to_json(otp_data: Dict[str, Any]):
     """
-    Menyimpan data OTP ke file JSON di ../get/smc.json dalam format Array of Objects.
-    Menggunakan encoding UTF-8 dan ensure_ascii=False untuk mendukung simbol.
+    Menyimpan data OTP ke file JSON di ../get/smc.json dalam format Array of Objects:
+    [{"Number": "...", "OTP": "...", "FullMessage": "..."}, ...]
     """
     
     # Pastikan folder sudah ada
@@ -197,10 +197,10 @@ def save_otp_to_json(otp_data: Dict[str, Any]):
     # -------------------------------------
     
     try:
-        # 1. Baca data yang sudah ada (gunakan encoding='utf-8')
+        # 1. Baca data yang sudah ada (jika file ada dan tidak kosong)
         existing_data = []
         if os.path.exists(OTP_SAVE_FILE) and os.stat(OTP_SAVE_FILE).st_size > 0:
-            with open(OTP_SAVE_FILE, 'r', encoding='utf-8') as f: # <-- PERUBAHAN ENCODING (MEMBACA)
+            with open(OTP_SAVE_FILE, 'r') as f:
                 try:
                     # Harapannya data yang sudah ada adalah list/array
                     existing_data = json.load(f)
@@ -212,10 +212,9 @@ def save_otp_to_json(otp_data: Dict[str, Any]):
         # 2. Tambahkan data baru
         existing_data.append(data_to_save)
         
-        # 3. Tulis kembali seluruh list ke file (gunakan encoding='utf-8' dan ensure_ascii=False)
-        with open(OTP_SAVE_FILE, 'w', encoding='utf-8') as f: # <-- PERUBAHAN ENCODING (MENULIS)
-            # ensure_ascii=False memastikan simbol disimpan dengan benar
-            json.dump(existing_data, f, indent=2, ensure_ascii=False) # <-- PERUBAHAN ensure_ascii=False
+        # 3. Tulis kembali seluruh list ke file
+        with open(OTP_SAVE_FILE, 'w') as f:
+            json.dump(existing_data, f, indent=2)
             
     except Exception as e:
         print(f"❌ ERROR: Failed to save OTP to JSON file {OTP_SAVE_FILE}: {e}")
@@ -239,7 +238,7 @@ class OTPFilter:
         if os.path.exists(self.file):
             try:
                 if os.stat(self.file).st_size > 0:
-                    with open(self.file, 'r', encoding='utf-8') as f: return json.load(f) # <-- TAMBAH ENCODING
+                    with open(self.file, 'r') as f: return json.load(f)
                 else: return {}
             except json.JSONDecodeError as e:
                 print(f"⚠️ WARNING: Cache file '{self.file}' corrupted. Resetting cache. Error: {e}")
@@ -254,7 +253,7 @@ class OTPFilter:
         temp_cache = self.cache.copy()
         temp_cache[self.CLEANUP_KEY] = self.last_cleanup_date_gmt
         # Simpan ke otp_cache.json
-        json.dump(temp_cache, open(self.file,'w', encoding='utf-8'), indent=2, ensure_ascii=False) # <-- TAMBAH ENCODING & ensure_ascii=False
+        json.dump(temp_cache, open(self.file,'w'), indent=2)
     
     def _cleanup(self):
         """Membersihkan cache berdasarkan pergantian hari GMT (setelah 23:59:59 GMT)."""
@@ -399,10 +398,9 @@ class SMSMonitor:
                 
                 # B. Raw Message (Original & Cleaned)
                 copy_icon = otp_badge_span.find("i", class_="copy-icon")
-                # raw_message_original adalah pesan mentah utuh dari atribut data-sms
                 raw_message_original = copy_icon.get('data-sms', 'N/A') if copy_icon and copy_icon.get('data-sms') else otp_badge_span.get_text(strip=True)
                 
-                # Logika pembersihan tetap ada untuk mendukung logika OTP fallback dan Service Name
+                # LOGIKA PENGAMBILAN PESAN PENUH MENTAH 
                 if ':' in raw_message_original and raw_message_original != 'N/A':
                     raw_message_clean = raw_message_original.split(':', 1)[1].strip()
                 else:
@@ -437,8 +435,7 @@ class SMSMonitor:
                         "service": service,
                         "range": range_text,
                         "timestamp": datetime.now().strftime("%H:%M:%S"),
-                        # PERUBAHAN: Menggunakan pesan mentah UTUH (raw_message_original)
-                        "raw_message": raw_message_original 
+                        "raw_message": raw_message_clean 
                     })
         return messages
     
