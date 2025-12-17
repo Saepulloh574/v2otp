@@ -683,11 +683,11 @@ def test_message_route():
     """Mengirim pesan tes ke Telegram menggunakan format OTP."""
     test_data = {
         "otp": "123456",
-        "phone": "+2250150086627",
+        "phone": "+12345678999",
         "service": "Facebook",
-        "range": "Ivory Coast",
+        "range": "Zura Store",
         "timestamp": datetime.now().strftime("%H:%M:%S"),
-        "raw_message": "123456 adalah kode konfirmasi Facebook anda. Harap berhati-hati dan jangan pernah membagikan kode ini. ID Referensi: AAABBBCC"
+        "raw_message": "123456 adalah kode konfirmasi Facebook anda: AAABBBCC"
     }
     
     test_msg = format_otp_message(test_data).replace("🔐 <b>New OTP Received</b>", "🧪 <b>TEST MESSAGE FROM DASHBOARD</b>")
@@ -747,7 +747,7 @@ if __name__ == "__main__":
         flask_thread.start()
         
         # 2. Kirim Pesan Aktivasi Telegram 
-        send_tg("✅ <b>BOT ACTIVE MONITORING IS RUNNING.</b>", with_inline_keyboard=False)
+        send_tg("✅ <b>BOT V2.MNIT ACTIVE MONITORING IS RUNNING.</b>", with_inline_keyboard=False)
         
         # 3. Mulai loop asinkron monitoring
         try:
