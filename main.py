@@ -372,7 +372,9 @@ class SMSMonitor:
         
         # 3. Buat page baru dan navigasi ke URL
         self.page = await context.new_page()
-        await self.page.goto(self.url, wait_until='networkidle') 
+        # >>> PERUBAHAN DI SINI: Mengubah 'networkidle' menjadi 'load'
+        await self.page.goto(self.url, wait_until='load') 
+        # <<< PERUBAHAN
         
         print("✅ Playwright page connected successfully.")
 
@@ -439,7 +441,7 @@ class SMSMonitor:
                     })
         return messages
     
-    # FUNGSI soft_refresh DIHAPUS, karena soft refresh otomatis setiap 60 detik dihapus
+    # FUNGSI soft_refresh DIHAPUS
 
     async def refresh_and_screenshot(self, admin_chat_id): 
         """
@@ -454,7 +456,7 @@ class SMSMonitor:
         screenshot_filename = f"screenshot_{int(time.time())}.png"
         try:
             print("🔄 Performing page refresh...")
-            await self.page.reload(wait_until='networkidle') 
+            await self.page.reload(wait_until='load') # Juga menggunakan 'load' di sini
             print(f"📸 Taking screenshot: {screenshot_filename}")
             await self.page.screenshot(path=screenshot_filename, full_page=True)
             print("📤 Sending screenshot to Admin Telegram...")
@@ -542,7 +544,6 @@ def check_cmd(stats):
 async def monitor_sms_loop():
     global total_sent
     global BOT_STATUS
-    # last_soft_refresh_time = time.time() # Variabel ini dihapus
 
     # 1. Gunakan async_playwright context manager
     async with async_playwright() as p:
@@ -561,8 +562,8 @@ async def monitor_sms_loop():
             try:
                 if BOT_STATUS["monitoring_active"]:
                     
-                    # --- Logika Soft Refresh Setiap 1 Menit DIHAPUS ---
-                    
+                    # Logika soft refresh otomatis sudah dihapus sesuai permintaan sebelumnya
+
                     msgs = await monitor.fetch_sms()
                     
                     # FILTER: Memfilter duplikasi dan MENYIMPAN ke otp_cache.json
@@ -584,7 +585,7 @@ async def monitor_sms_loop():
                             
                             await asyncio.sleep(2) 
                         
-                        # --- Refresh otomatis DENGAN SCREENSHOT DIHAPUS ---
+                        # Refresh otomatis setelah OTP ditemukan sudah dihapus sesuai permintaan sebelumnya
 
                 else:
                     print("⏸️ Monitoring paused.")
