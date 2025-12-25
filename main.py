@@ -439,20 +439,13 @@ class SMSMonitor:
                     })
         return messages
     
-    async def soft_refresh(self): 
-        """Memuat ulang halaman tanpa screenshot atau notifikasi Telegram."""
-        if not self.page: 
-            print("❌ Error: Page not initialized for soft refresh.")
-            return
-
-        try:
-            print("🔄 Performing soft page refresh...")
-            await self.page.reload(wait_until='networkidle') 
-            print("✅ Soft refresh complete.")
-        except Exception as e:
-            print(f"❌ Error during soft refresh: {e}")
+    # FUNGSI soft_refresh DIHAPUS, karena soft refresh otomatis setiap 60 detik dihapus
 
     async def refresh_and_screenshot(self, admin_chat_id): 
+        """
+        Fungsi untuk refresh halaman dan mengambil screenshot. 
+        Sekarang hanya dipanggil secara manual dari /refresh (Telegram) atau dashboard.
+        """
         if not self.page:
             print("❌ Error: Page not initialized for refresh/screenshot.")
             send_tg(f"⚠️ **Error Refresh/Screenshot**: Gagal inisialisasi koneksi browser.", target_chat_id=admin_chat_id)
@@ -549,8 +542,8 @@ def check_cmd(stats):
 async def monitor_sms_loop():
     global total_sent
     global BOT_STATUS
-    last_soft_refresh_time = time.time()
-    
+    # last_soft_refresh_time = time.time() # Variabel ini dihapus
+
     # 1. Gunakan async_playwright context manager
     async with async_playwright() as p:
         try:
@@ -568,13 +561,8 @@ async def monitor_sms_loop():
             try:
                 if BOT_STATUS["monitoring_active"]:
                     
-                    # --- Logika Soft Refresh Setiap 1 Menit ---
-                    current_time = time.time()
-                    if current_time - last_soft_refresh_time >= 60: 
-                        await monitor.soft_refresh() 
-                        last_soft_refresh_time = current_time 
-                    # ------------------------------------------
-
+                    # --- Logika Soft Refresh Setiap 1 Menit DIHAPUS ---
+                    
                     msgs = await monitor.fetch_sms()
                     
                     # FILTER: Memfilter duplikasi dan MENYIMPAN ke otp_cache.json
@@ -596,12 +584,8 @@ async def monitor_sms_loop():
                             
                             await asyncio.sleep(2) 
                         
-                        if ADMIN_ID is not None:
-                            # Refresh otomatis DENGAN SCREENSHOT setelah OTP baru terdeteksi
-                            print("⚙️ Executing automatic refresh and screenshot to admin...")
-                            await monitor.refresh_and_screenshot(admin_chat_id=ADMIN_ID)
-                        else:
-                            print("⚠️ WARNING: ADMIN_ID not set. Skipping automatic refresh/screenshot.")
+                        # --- Refresh otomatis DENGAN SCREENSHOT DIHAPUS ---
+
                 else:
                     print("⏸️ Monitoring paused.")
 
