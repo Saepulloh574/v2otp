@@ -367,16 +367,49 @@ class SMSMonitor:
         # 1. Koneksi ke Chrome Debug Port menggunakan Playwright
         self.browser = await p_instance.chromium.connect_over_cdp("http://127.0.0.1:9222")
         
-        # 2. Ambil context pertama 
+        # 2. Ambil context pertama
         context = self.browser.contexts[0]
         
-        # 3. Buat page baru dan navigasi ke URL
-        self.page = await context.new_page()
-        # >>> PERUBAHAN DI SINI: Mengubah 'networkidle' menjadi 'load'
-        await self.page.goto(self.url, wait_until='load') 
-        # <<< PERUBAHAN
+        # 3. Cek apakah sudah ada page/tab yang terbuka di context ini
+        pages = context.pages
         
-        print("✅ Playwright page connected successfully.")
+        if pages:
+            # Jika ada page yang sudah terbuka, gunakan page pertama
+            self.page = pages[0]
+            print("✅ Menggunakan tab/page Chrome yang sudah ada.")
+        else:
+            # Jika belum ada, buat page baru
+            self.page = await context.new_page()
+            print("✅ Membuat tab/page Chrome baru.")
+        
+        try:
+            # 4. Melakukan navigasi simulasi Human Typing
+            
+            # Fokuskan ke address bar (Ctrl+L atau F6) untuk memastikan kursor di sana
+            # (Perintah ini mungkin tidak bekerja di semua OS/konfigurasi RDP, tetapi kita coba)
+            await self.page.keyboard.down('Control')
+            await self.page.keyboard.press('L')
+            await self.page.keyboard.up('Control')
+            await asyncio.sleep(0.5) # Jeda sebentar
+            
+            print(f"🔄 Mengetik URL: {self.url}...")
+            # Mengetik URL dengan delay untuk simulasi manusia
+            await self.page.keyboard.type(self.url, delay=100) # delay=100ms per karakter
+            
+            # Tekan Enter, dan tunggu navigasi selesai
+            # Kita menggunakan wait_for_event karena penekanan 'Enter' akan memicu navigasi
+            async with self.page.expect_navigation(timeout=45000, wait_until='load'):
+                await self.page.keyboard.press('Enter')
+            
+        except Exception as e:
+            # Tangani kegagalan navigasi dan tampilkan pesan yang jelas
+            error_msg = f"FATAL ERROR NAVIGASI: Gagal menavigasi ke {self.url} (Typing failed). Error: {e.__class__.__name__}: {e}. Pastikan Chrome diluncurkan dengan `--remote-debugging-port=9222`."
+            print(f"❌ {error_msg}")
+            send_tg(f"🚨 **FATAL ERROR**: {error_msg}")
+            # Melemparkan error agar loop monitoring tidak dilanjutkan
+            raise 
+    
+        print("✅ Playwright page connected and navigated successfully.")
 
     async def fetch_sms(self) -> List[Dict[str, Any]]:
         if not self.page: 
@@ -551,8 +584,8 @@ async def monitor_sms_loop():
             # 2. Panggil initialize dengan instance Playwright 'p'
             await monitor.initialize(p)
         except Exception as e:
-            print(f"FATAL ERROR: Failed to initialize SMSMonitor (Playwright/Browser connection). {e}")
-            send_tg("🚨 **FATAL ERROR**: Gagal terhubung ke Chrome/Playwright. Pastikan Chrome berjalan dengan `--remote-debugging-port=9222`.")
+            # Pesan FATAL ERROR sudah dikirim dari fungsi initialize, kita hanya mencetak dan keluar
+            print(f"FATAL ERROR: Failed to initialize SMSMonitor (Playwright/Browser connection or navigation). {e}")
             BOT_STATUS["status"] = "FATAL ERROR"
             return 
     
@@ -562,8 +595,6 @@ async def monitor_sms_loop():
             try:
                 if BOT_STATUS["monitoring_active"]:
                     
-                    # Logika soft refresh otomatis sudah dihapus sesuai permintaan sebelumnya
-
                     msgs = await monitor.fetch_sms()
                     
                     # FILTER: Memfilter duplikasi dan MENYIMPAN ke otp_cache.json
@@ -584,8 +615,6 @@ async def monitor_sms_loop():
                             total_sent += 1
                             
                             await asyncio.sleep(2) 
-                        
-                        # Refresh otomatis setelah OTP ditemukan sudah dihapus sesuai permintaan sebelumnya
 
                 else:
                     print("⏸️ Monitoring paused.")
@@ -713,9 +742,9 @@ if __name__ == "__main__":
         print("Starting SMS Monitor Bot and Flask API...")
         
         print("\n=======================================================")
-        print("     ⚠️  PENTING: JALANKAN NGROK DI TERMINAL LAIN  ⚠️")
-        print("     Setelah bot ini running, buka terminal baru dan:")
-        print("     ngrok http 5000")
+        print("     ⚠️  PENTING: PASTIKAN CHROME SUDAH BERJALAN  ⚠️")
+        print("     DI TERMINAL LAIN DENGAN PERINTAH:")
+        print(f"""     & "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\chrome-debug" """)
         print("=======================================================\n")
 
         try:
