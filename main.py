@@ -367,49 +367,14 @@ class SMSMonitor:
         # 1. Koneksi ke Chrome Debug Port menggunakan Playwright
         self.browser = await p_instance.chromium.connect_over_cdp("http://127.0.0.1:9222")
         
-        # 2. Ambil context pertama
+        # 2. Ambil context pertama 
         context = self.browser.contexts[0]
         
-        # 3. Cek apakah sudah ada page/tab yang terbuka di context ini
-        pages = context.pages
+        # 3. Buat page baru dan navigasi ke URL
+        self.page = await context.new_page()
+        await self.page.goto(self.url, wait_until='networkidle') 
         
-        if pages:
-            # Jika ada page yang sudah terbuka, gunakan page pertama
-            self.page = pages[0]
-            print("✅ Menggunakan tab/page Chrome yang sudah ada.")
-        else:
-            # Jika belum ada, buat page baru
-            self.page = await context.new_page()
-            print("✅ Membuat tab/page Chrome baru.")
-        
-        try:
-            # 4. Melakukan navigasi simulasi Human Typing
-            
-            # Fokuskan ke address bar (Ctrl+L atau F6) untuk memastikan kursor di sana
-            # (Perintah ini mungkin tidak bekerja di semua OS/konfigurasi RDP, tetapi kita coba)
-            await self.page.keyboard.down('Control')
-            await self.page.keyboard.press('L')
-            await self.page.keyboard.up('Control')
-            await asyncio.sleep(0.5) # Jeda sebentar
-            
-            print(f"🔄 Mengetik URL: {self.url}...")
-            # Mengetik URL dengan delay untuk simulasi manusia
-            await self.page.keyboard.type(self.url, delay=100) # delay=100ms per karakter
-            
-            # Tekan Enter, dan tunggu navigasi selesai
-            # Kita menggunakan wait_for_event karena penekanan 'Enter' akan memicu navigasi
-            async with self.page.expect_navigation(timeout=45000, wait_until='load'):
-                await self.page.keyboard.press('Enter')
-            
-        except Exception as e:
-            # Tangani kegagalan navigasi dan tampilkan pesan yang jelas
-            error_msg = f"FATAL ERROR NAVIGASI: Gagal menavigasi ke {self.url} (Typing failed). Error: {e.__class__.__name__}: {e}. Pastikan Chrome diluncurkan dengan `--remote-debugging-port=9222`."
-            print(f"❌ {error_msg}")
-            send_tg(f"🚨 **FATAL ERROR**: {error_msg}")
-            # Melemparkan error agar loop monitoring tidak dilanjutkan
-            raise 
-    
-        print("✅ Playwright page connected and navigated successfully.")
+        print("✅ Playwright page connected successfully.")
 
     async def fetch_sms(self) -> List[Dict[str, Any]]:
         if not self.page: 
@@ -474,13 +439,21 @@ class SMSMonitor:
                     })
         return messages
     
-    # FUNGSI soft_refresh DIHAPUS
+    async def soft_refresh(self): 
+        """Memuat ulang halaman tanpa screenshot atau notifikasi Telegram."""
+        if not self.page: 
+            print("❌ Error: Page not initialized for soft refresh.")
+            return
+
+        try:
+            print("🔄 Performing soft page refresh...")
+            # Menggunakan reload untuk refresh secara penuh, karena soft refresh 1 menit sudah dihapus
+            await self.page.reload(wait_until='networkidle') 
+            print("✅ Soft refresh complete.")
+        except Exception as e:
+            print(f"❌ Error during soft refresh: {e}")
 
     async def refresh_and_screenshot(self, admin_chat_id): 
-        """
-        Fungsi untuk refresh halaman dan mengambil screenshot. 
-        Sekarang hanya dipanggil secara manual dari /refresh (Telegram) atau dashboard.
-        """
         if not self.page:
             print("❌ Error: Page not initialized for refresh/screenshot.")
             send_tg(f"⚠️ **Error Refresh/Screenshot**: Gagal inisialisasi koneksi browser.", target_chat_id=admin_chat_id)
@@ -489,7 +462,7 @@ class SMSMonitor:
         screenshot_filename = f"screenshot_{int(time.time())}.png"
         try:
             print("🔄 Performing page refresh...")
-            await self.page.reload(wait_until='load') # Juga menggunakan 'load' di sini
+            await self.page.reload(wait_until='networkidle') 
             print(f"📸 Taking screenshot: {screenshot_filename}")
             await self.page.screenshot(path=screenshot_filename, full_page=True)
             print("📤 Sending screenshot to Admin Telegram...")
@@ -577,15 +550,16 @@ def check_cmd(stats):
 async def monitor_sms_loop():
     global total_sent
     global BOT_STATUS
-
+    #last_soft_refresh_time = time.time() # Variabel ini tidak lagi digunakan
+    
     # 1. Gunakan async_playwright context manager
     async with async_playwright() as p:
         try:
             # 2. Panggil initialize dengan instance Playwright 'p'
             await monitor.initialize(p)
         except Exception as e:
-            # Pesan FATAL ERROR sudah dikirim dari fungsi initialize, kita hanya mencetak dan keluar
-            print(f"FATAL ERROR: Failed to initialize SMSMonitor (Playwright/Browser connection or navigation). {e}")
+            print(f"FATAL ERROR: Failed to initialize SMSMonitor (Playwright/Browser connection). {e}")
+            send_tg("🚨 **FATAL ERROR**: Gagal terhubung ke Chrome/Playwright. Pastikan Chrome berjalan dengan `--remote-debugging-port=9222`.")
             BOT_STATUS["status"] = "FATAL ERROR"
             return 
     
@@ -594,6 +568,10 @@ async def monitor_sms_loop():
         while True:
             try:
                 if BOT_STATUS["monitoring_active"]:
+                    
+                    # =========================================================
+                    # !!! SOFT REFRESH OTOMATIS (SETIAP 1 MENIT) DIHAPUS !!!
+                    # =========================================================
                     
                     msgs = await monitor.fetch_sms()
                     
@@ -615,7 +593,10 @@ async def monitor_sms_loop():
                             total_sent += 1
                             
                             await asyncio.sleep(2) 
-
+                        
+                        # Refresh otomatis DENGAN SCREENSHOT telah dihapus
+                        print("ℹ️ ALL automatic refresh functions are disabled. Use /refresh command.")
+                        
                 else:
                     print("⏸️ Monitoring paused.")
 
@@ -742,9 +723,9 @@ if __name__ == "__main__":
         print("Starting SMS Monitor Bot and Flask API...")
         
         print("\n=======================================================")
-        print("     ⚠️  PENTING: PASTIKAN CHROME SUDAH BERJALAN  ⚠️")
-        print("     DI TERMINAL LAIN DENGAN PERINTAH:")
-        print(f"""     & "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="C:\chrome-debug" """)
+        print("     ⚠️  PENTING: JALANKAN NGROK DI TERMINAL LAIN  ⚠️")
+        print("     Setelah bot ini running, buka terminal baru dan:")
+        print("     ngrok http 5000")
         print("=======================================================\n")
 
         try:
