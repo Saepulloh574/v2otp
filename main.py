@@ -61,7 +61,7 @@ COUNTRY_EMOJI = {
     "SIERRA LEONE": "🇸🇱",
     "MADAGASCAR": "🇲🇬",
     "AFGANISTAN": "🇦🇫",
-    "ZURA STORE": "🇮🇩" # Tambahkan ini jika itu adalah penanda lokal
+    "ZURA STORE": "🇮🇩"
 }
 
 def get_country_emoji(country_name: str) -> str:
@@ -81,16 +81,13 @@ def create_inline_keyboard():
 def clean_phone_number(phone):
     if not phone: return "N/A"
     cleaned = re.sub(r'[^\d+]', '', phone)
-    # Menambahkan prefix + jika belum ada dan formatnya bukan N/A
     if cleaned and not cleaned.startswith('+') and cleaned != 'N/A':
-        # Asumsi semua nomor MNIT Network sudah memiliki kode negara (10+ digit)
         cleaned = '+' + cleaned
     return cleaned or phone
 
 def mask_phone_number(phone, visible_start=4, visible_end=4):
     if not phone or phone == "N/A": return phone
     prefix = ""
-    # Menangani prefix '+'
     if phone.startswith('+'):
         prefix = '+'
         digits = phone[1:]
@@ -100,7 +97,6 @@ def mask_phone_number(phone, visible_start=4, visible_end=4):
     if len(digits) <= visible_start + visible_end:
         return phone
         
-    # Pastikan digits adalah string angka
     digits = re.sub(r'[^\d]', '', digits)
 
     start_part = digits[:visible_start]
@@ -119,6 +115,7 @@ def format_otp_message(otp_data: Dict[str, Any]) -> str:
     full_message = otp_data.get('raw_message', 'N/A')
     
     emoji = get_country_emoji(range_text)
+    # Gunakan full_message asli yang sudah utuh, dan lakukan escaping
     full_message_escaped = full_message.replace('<', '&lt;').replace('>', '&gt;') 
     
     # Menggunakan tag <b> dan <code> sesuai permintaan
@@ -163,13 +160,35 @@ def extract_otp_from_text(text):
     return None
 
 def clean_service_name(service):
+    """Fungsi untuk membersihkan dan menstandarisasi nama layanan."""
     if not service: return "Unknown"
-    s = service.strip().title()
-    maps = {'fb':'Facebook','google':'Google','whatsapp':'WhatsApp','telegram':'Telegram','instagram':'Instagram','twitter':'Twitter','linkedin':'LinkedIn','tiktok':'TikTok', 'mnitnetwork':'M-NIT Network', 'laz+nxcar':'Facebook'}
-    l = s.lower()
-    for k,v in maps.items():
-        if k in l: return v
-    return s
+    
+    # Daftar pemetaan kata kunci service
+    maps = {
+        'facebook': 'Facebook',
+        'whatsapp': 'WhatsApp',
+        'instagram': 'Instagram',
+        'telegram': 'Telegram',
+        'google': 'Google',
+        'twitter': 'Twitter',
+        'linkedin': 'LinkedIn',
+        'tiktok': 'TikTok', 
+        'mnitnetwork': 'M-NIT Network',
+        'laz+nxcar': 'Facebook', # Pemetaan spesifik dari MNIT
+        # Hindari kata umum menjadi nama service
+        'ваш':'Unknown Service (RU)', 
+        'your':'Unknown Service (EN)',
+    }
+    
+    s_lower = service.strip().lower()
+
+    # Prioritas 1: Mencari kecocokan tepat dari kata kunci di pesan yang masuk
+    for k, v in maps.items():
+        if k in s_lower:
+            return v
+            
+    # Prioritas 2: Jika tidak ada kecocokan, kembalikan teks asli dengan Title case
+    return service.strip().title()
 
 def get_status_message(stats):
     # Menggunakan tag <b> dan <code>
@@ -256,7 +275,6 @@ class OTPFilter:
             self._save()
         
     def key(self, d: Dict[str, Any]) -> str: 
-        # Menggunakan OTP sebagai kunci, karena nomor di MNIT bisa berganti-ganti (pool)
         return str(d.get('otp'))
     
     def is_dup(self, d: Dict[str, Any]) -> bool:
@@ -473,7 +491,7 @@ class SMSMonitor:
     async def fetch_sms(self) -> List[Dict[str, Any]]:
         """
         Mengambil data SMS dari dashboard, diadaptasi untuk struktur HTML baru
-        dengan fokus pada status 'success'.
+        dengan fokus pada status 'success' dan perbaikan ekstraksi Service/Raw Message.
         """
         if not self.page or not self.is_logged_in: 
             print("⚠️ ERROR: Page not initialized or not logged in during fetch_sms.")
@@ -482,13 +500,11 @@ class SMSMonitor:
         if self.page.url != self.url:
             print(f"Navigating to dashboard URL: {self.url}")
             try:
-                # Gunakan 'domcontentloaded' untuk load lebih cepat, lalu tunggu elemen
                 await self.page.goto(self.url, wait_until='domcontentloaded', timeout=15000)
             except Exception as e:
                 print(f"❌ Error navigating to dashboard: {e}")
                 return []
                 
-        # Tunggu elemen tbody yang berisi data
         try:
             await self.page.wait_for_selector('tbody.text-sm.divide-y.divide-white\\/5', timeout=10000)
         except Exception as e:
@@ -500,7 +516,6 @@ class SMSMonitor:
         soup = BeautifulSoup(html, "html.parser")
         messages = []
 
-        # Cari tbody yang berisi baris data
         tbody = soup.find("tbody", class_="text-sm divide-y divide-white/5")
         if not tbody:
             print("❌ Error: Tbody data tidak ditemukan.")
@@ -508,58 +523,60 @@ class SMSMonitor:
             
         rows = tbody.find_all("tr")
 
+        # Daftar kata kunci layanan yang dicari, dikumpulkan menjadi satu pola regex
+        SERVICE_KEYWORDS = r'(facebook|whatsapp|instagram|telegram|google|twitter|linkedin|tiktok)'
+
         for r in rows:
             tds = r.find_all("td")
             if len(tds) < 3:
-                continue # Skip jika baris tidak lengkap
+                continue
             
-            # Kolom 1: Phone, Status, Message
             col1 = tds[0]
             
-            # Status: Cari span status (success/pending/failed)
             status_span = col1.find("span", class_=lambda x: x and "text-[10px] uppercase" in x and "rounded-md" in x)
             status = status_span.get_text(strip=True) if status_span else "N/A"
             
-            # Kita hanya ingin memproses pesan yang sudah sukses
+            # Hanya proses yang statusnya 'success'
             if status.lower() != 'success':
                  continue
             
-            # A. Phone Number: Class: font-mono ... group-hover:text-blue-400
+            # A. Phone Number
             phone_span = col1.find("span", class_=lambda x: x and "font-mono text-white font-bold text-lg" in x)
             phone_number_raw = phone_span.get_text(strip=True) if phone_span else "N/A"
             phone = clean_phone_number(phone_number_raw)
             
-            # B. Raw Message dan OTP (Div dengan badge OTP)
-            # Div yang berisi pesan lengkap adalah yang memiliki class 'bg-slate-800 border border-slate-700'
+            # B. Raw Message (FULL)
+            # Div yang berisi pesan lengkap
             message_div = col1.find("div", class_=lambda x: x and "bg-slate-800 border" in x and "rounded-l-md" in x)
             
             if not message_div:
-                print(f"⚠️ Warning: 'success' status found for {phone}, but message div is missing.")
                 continue
             
-            # Ambil seluruh teks dari div pesan
-            # Contoh: <#> 753735 — your code for Facebook Laz+nxCarLW
+            # raw_message_full berisi: <#> 753735 — ваш код для Facebook Laz+nxCarLW
             raw_message_full = message_div.get_text(strip=True, separator=' ')
-            
-            # Pisahkan pesan penuh dari OTP dan simbol awal (<#> 753735 — )
-            if '—' in raw_message_full:
-                raw_message_clean = raw_message_full.split('—', 1)[1].strip()
-            else:
-                raw_message_clean = raw_message_full # Fallback jika format berubah
             
             
             # C. OTP (Ekstraksi dari teks mentah full, menggunakan fungsi yang diperbarui)
             otp = extract_otp_from_text(raw_message_full)
                     
             # D. Range/Country (Kolom kedua)
-            # Class: text-slate-200 font-medium
             range_span = tds[1].find("span", class_="text-slate-200 font-medium")
             range_text = range_span.get_text(strip=True) if range_span else "N/A"
             
-            # E. Service 
-            # Ambil kata pertama (atau beberapa kata) dari pesan bersih untuk menentukan service
-            service_raw = raw_message_clean.split(' ', 1)[0] if raw_message_clean != 'N/A' and raw_message_clean else 'Unknown'
-            service = clean_service_name(service_raw)
+            # E. Service (Logika ekstraksi yang ditingkatkan)
+            # 1. Cari nama service (Facebook, Google, dll.) di seluruh pesan (case-insensitive)
+            service_match = re.search(SERVICE_KEYWORDS, raw_message_full, re.IGNORECASE)
+            
+            if service_match:
+                # Jika ketemu, gunakan kata kunci yang cocok untuk dibersihkan
+                service = clean_service_name(service_match.group(1))
+            else:
+                # 2. Fallback: Ambil kata pertama setelah tanda '—' untuk diolah clean_service_name
+                service_hint = raw_message_full.split('—', 1)[1].strip() if '—' in raw_message_full else raw_message_full
+                
+                # Pisahkan kata pertama dari hint service (Contoh: "ваш" atau "your")
+                service_raw = service_hint.split(' ', 1)[0]
+                service = clean_service_name(service_raw)
             
             # --- Simpan Hasil ---
             if otp and phone != 'N/A':
@@ -569,7 +586,7 @@ class SMSMonitor:
                     "service": service,
                     "range": range_text,
                     "timestamp": datetime.now().strftime("%H:%M:%S"),
-                    "raw_message": raw_message_clean 
+                    "raw_message": raw_message_full # Menggunakan pesan FULL
                 })
         return messages
     
@@ -886,7 +903,7 @@ def test_message_route():
         "service": "Facebook",
         "range": "Zura Store",
         "timestamp": datetime.now().strftime("%H:%M:%S"),
-        "raw_message": "123456 adalah kode konfirmasi Facebook anda: AAABBBCC"
+        "raw_message": "<#> 123456 — Your code for Facebook Test Service"
     }
     
     test_msg = format_otp_message(test_data).replace("🔐 <b>New OTP Received</b>", "🧪 <b>TEST MESSAGE FROM DASHBOARD</b>")
