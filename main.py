@@ -61,6 +61,7 @@ COUNTRY_EMOJI = {
     "SIERRA LEONE": "🇸🇱",
     "MADAGASCAR": "🇲🇬",
     "AFGANISTAN": "🇦🇫",
+    "ZURA STORE": "🇮🇩" # Tambahkan ini jika itu adalah penanda lokal
 }
 
 def get_country_emoji(country_name: str) -> str:
@@ -80,20 +81,28 @@ def create_inline_keyboard():
 def clean_phone_number(phone):
     if not phone: return "N/A"
     cleaned = re.sub(r'[^\d+]', '', phone)
-    if cleaned and not cleaned.startswith('+'):
-        if len(cleaned) >= 10: cleaned = '+' + cleaned
+    # Menambahkan prefix + jika belum ada dan formatnya bukan N/A
+    if cleaned and not cleaned.startswith('+') and cleaned != 'N/A':
+        # Asumsi semua nomor MNIT Network sudah memiliki kode negara (10+ digit)
+        cleaned = '+' + cleaned
     return cleaned or phone
 
 def mask_phone_number(phone, visible_start=4, visible_end=4):
     if not phone or phone == "N/A": return phone
     prefix = ""
+    # Menangani prefix '+'
     if phone.startswith('+'):
         prefix = '+'
         digits = phone[1:]
     else:
         digits = phone
+        
     if len(digits) <= visible_start + visible_end:
         return phone
+        
+    # Pastikan digits adalah string angka
+    digits = re.sub(r'[^\d]', '', digits)
+
     start_part = digits[:visible_start]
     end_part = digits[-visible_end:]
     mask_length = len(digits) - visible_start - visible_end
@@ -125,14 +134,24 @@ FULL MESSAGES:
 <blockquote>{full_message_escaped}</blockquote>"""
 
 def extract_otp_from_text(text):
-    """Fungsi ekstraksi OTP yang fleksibel."""
+    """Fungsi ekstraksi OTP yang fleksibel, diperbarui untuk pola MNIT Network baru."""
     if not text: return None
-    patterns = [ r'\b(\d{6})\b', r'\b(\d{5})\b', r'\b(\d{4})\b', r'code[:\s]*(\d+)', r'verification[:\s]*(\d+)', r'otp[:\s]*(\d+)', r'pin[:\s]*(\d+)' ]
+    patterns = [ 
+        r'<#>\s*(\d+)\s*—',  # Pola baru untuk format: <#> [OTP] —
+        r'\b(\d{6})\b', 
+        r'\b(\d{5})\b', 
+        r'\b(\d{4})\b', 
+        r'code[:\s]*(\d+)', 
+        r'verification[:\s]*(\d+)', 
+        r'otp[:\s]*(\d+)', 
+        r'pin[:\s]*(\d+)' 
+    ]
     for p in patterns:
         m = re.search(p, text, re.I)
         if m:
             matched_otp = m.group(1) if len(m.groups()) >= 1 else m.group(0)
             
+            # Filter tanggal 4 digit (misal 2026)
             if len(matched_otp) == 4:
                 try:
                     if 2000 <= int(matched_otp) <= 2099: continue 
@@ -146,7 +165,7 @@ def extract_otp_from_text(text):
 def clean_service_name(service):
     if not service: return "Unknown"
     s = service.strip().title()
-    maps = {'fb':'Facebook','google':'Google','whatsapp':'WhatsApp','telegram':'Telegram','instagram':'Instagram','twitter':'Twitter','linkedin':'LinkedIn','tiktok':'TikTok', 'mnitnetwork':'M-NIT Network'}
+    maps = {'fb':'Facebook','google':'Google','whatsapp':'WhatsApp','telegram':'Telegram','instagram':'Instagram','twitter':'Twitter','linkedin':'LinkedIn','tiktok':'TikTok', 'mnitnetwork':'M-NIT Network', 'laz+nxcar':'Facebook'}
     l = s.lower()
     for k,v in maps.items():
         if k in l: return v
@@ -237,6 +256,7 @@ class OTPFilter:
             self._save()
         
     def key(self, d: Dict[str, Any]) -> str: 
+        # Menggunakan OTP sebagai kunci, karena nomor di MNIT bisa berganti-ganti (pool)
         return str(d.get('otp'))
     
     def is_dup(self, d: Dict[str, Any]) -> bool:
@@ -322,6 +342,7 @@ class SMSMonitor:
     async def initialize(self, p_instance):
         
         # 1. Koneksi ke Chrome Debug Port
+        # Menggunakan 'http://127.0.0.1:9222' sesuai konfigurasi standar
         self.browser = await p_instance.chromium.connect_over_cdp("http://127.0.0.1:9222")
         
         # 2. Ambil context pertama 
@@ -351,7 +372,7 @@ class SMSMonitor:
         # Logged in jika URL mengarah ke Dashboard
         if current_url.startswith("https://x.mnitnetwork.com/mdashboard"):
             self.is_logged_in = True
-        # Sebaliknya, anggap belum login (termasuk di halaman login, base URL, atau URL tak dikenal)
+        # Sebaliknya, anggap belum login
         else:
             self.is_logged_in = False
 
@@ -369,7 +390,7 @@ class SMSMonitor:
             raise Exception("Login credentials not found in memory. Please use /login command first.")
         
         # --- Navigasi eksplisit dan tunggu selector ---
-        print(f"Attempting to navigate to login page: {LOGIN_URL} (Simulating Human Typing URL)")
+        print(f"Attempting to navigate to login page: {LOGIN_URL}")
         
         await self.page.goto("about:blank") 
         await self.page.goto(LOGIN_URL, wait_until='load', timeout=15000) 
@@ -395,18 +416,18 @@ class SMSMonitor:
         print("Clicking login button...")
         await asyncio.sleep(1) 
         
-        # 4. TUNGGU VALIDASI LOGIN (Menggunakan Playwright's wait_for_url)
+        # 4. TUNGGU VALIDASI LOGIN
         try:
             # Lakukan klik
             await self.page.click(SUBMIT_SELECTOR) 
 
             # TUNGGU URL DASHBOARD secara eksplisit (30 detik)
             print(f"Waiting for dashboard URL: {DASHBOARD_URL}...")
-            # Gunakan regex agar mencakup /mdashboard atau /mdashboard/getnum
-            await self.page.wait_for_url("https://x.mnitnetwork.com/mdashboard**", timeout=30000) 
+            # Gunakan regex untuk mencakup /mdashboard atau /mdashboard/getnum
+            await self.page.wait_for_url(re.compile(r"https:\/\/x\.mnitnetwork\.com\/mdashboard.*"), timeout=30000) 
             
-            # Optional: Tunggu elemen khas dashboard (tabel) untuk memastikan render sukses
-            await self.page.wait_for_selector('table', timeout=10000)
+            # Optional: Tunggu elemen khas dashboard (tbody)
+            await self.page.wait_for_selector('tbody', timeout=10000)
             
             self.is_logged_in = True
             self._temp_username = None 
@@ -418,7 +439,6 @@ class SMSMonitor:
         # --- Catch Playwright and other errors ---
         except Exception as e:
             self.is_logged_in = False
-            # Dapatkan URL saat terjadi kegagalan untuk debugging
             current_url_on_fail = self.page.url if self.page else "N/A"
             
             error_detail = str(e).split('\n')[0]
@@ -427,7 +447,7 @@ class SMSMonitor:
             
             screenshot_filename = f"login_fail_{int(time.time())}.png"
             try:
-                # Pastikan browser masih terbuka sebelum ambil screenshot
+                # Ambil screenshot
                 await self.page.screenshot(path=screenshot_filename, full_page=True)
                 send_photo_tg(screenshot_filename, f"⚠️ Gagal Login ke <b>X.MNITNetwork</b>. URL saat gagal: <code>{current_url_on_fail}</code>", target_chat_id=ADMIN_ID)
                 os.remove(screenshot_filename)
@@ -435,7 +455,6 @@ class SMSMonitor:
                 print(f"❌ Gagal mengambil screenshot: {se.__class__.__name__}")
                 send_tg(f"⚠️ Gagal Login ke <b>X.MNITNetwork</b>. Error: <code>{e.__class__.__name__}</code>. Gagal mengambil screenshot.", target_chat_id=ADMIN_ID)
             
-            # Raise exception dengan pesan yang lebih spesifik
             raise Exception(f"Validasi URL Login GAGAL: {current_url_on_fail}")
 
     async def login_and_notify(self, admin_chat_id):
@@ -447,14 +466,15 @@ class SMSMonitor:
                 send_tg(f"✅ Login berhasil! Sekarang Anda dapat memulai monitoring dengan perintah: <code>/startnew</code>", target_chat_id=admin_chat_id)
             
         except Exception as e:
-            # Dapatkan ringkasan error (misal: "Validasi URL Login GAGAL: ...")
             error_summary = str(e).split('\n')[0] 
-            
-            # Menggunakan pesan yang lebih informatif
             send_tg(f"❌ Login GAGAL. Error: <code>{error_summary}</code>. Cek screenshot yang baru saja terkirim untuk detail halaman.", target_chat_id=admin_chat_id)
             self.is_logged_in = False
 
     async def fetch_sms(self) -> List[Dict[str, Any]]:
+        """
+        Mengambil data SMS dari dashboard, diadaptasi untuk struktur HTML baru
+        dengan fokus pada status 'success'.
+        """
         if not self.page or not self.is_logged_in: 
             print("⚠️ ERROR: Page not initialized or not logged in during fetch_sms.")
             return []
@@ -462,66 +482,95 @@ class SMSMonitor:
         if self.page.url != self.url:
             print(f"Navigating to dashboard URL: {self.url}")
             try:
-                await self.page.goto(self.url, wait_until='networkidle', timeout=15000)
+                # Gunakan 'domcontentloaded' untuk load lebih cepat, lalu tunggu elemen
+                await self.page.goto(self.url, wait_until='domcontentloaded', timeout=15000)
             except Exception as e:
                 print(f"❌ Error navigating to dashboard: {e}")
                 return []
+                
+        # Tunggu elemen tbody yang berisi data
+        try:
+            await self.page.wait_for_selector('tbody.text-sm.divide-y.divide-white\\/5', timeout=10000)
+        except Exception as e:
+            print(f"❌ Error: Gagal menemukan tabel data SMS (tbody): {e}")
+            return []
 
 
         html = await self.page.content()
         soup = BeautifulSoup(html, "html.parser")
         messages = []
 
-        rows = soup.find_all("tr")
-        for r in rows:
-            otp_badge_span = r.find("span", class_="otp-badge")
+        # Cari tbody yang berisi baris data
+        tbody = soup.find("tbody", class_="text-sm divide-y divide-white/5")
+        if not tbody:
+            print("❌ Error: Tbody data tidak ditemukan.")
+            return []
             
-            if otp_badge_span:
-                
-                # A. Phone Number
-                phone_span = r.find("span", class_="phone-number")
-                phone = clean_phone_number(phone_span.get_text(strip=True) if phone_span else "N/A")
-                
-                # B. Raw Message
-                copy_icon = otp_badge_span.find("i", class_="copy-icon")
-                raw_message_original = copy_icon.get('data-sms', 'N/A') if copy_icon and copy_icon.get('data-sms') else otp_badge_span.get_text(strip=True)
-                
-                if ':' in raw_message_original and raw_message_original != 'N/A':
-                    raw_message_clean = raw_message_original.split(':', 1)[1].strip()
-                else:
-                    raw_message_clean = raw_message_original
-                
-                
-                # C. OTP 
-                otp_raw_text_parts = [t.strip() for t in otp_badge_span.contents if t.name is None and t.strip()]
-                otp = otp_raw_text_parts[0] if otp_raw_text_parts and otp_raw_text_parts[0].isdigit() else None 
-                
-                if not otp:
-                    otp_full_text = otp_badge_span.get_text(strip=True, separator=' ')
-                    otp = extract_otp_from_text(otp_full_text)
+        rows = tbody.find_all("tr")
+
+        for r in rows:
+            tds = r.find_all("td")
+            if len(tds) < 3:
+                continue # Skip jika baris tidak lengkap
+            
+            # Kolom 1: Phone, Status, Message
+            col1 = tds[0]
+            
+            # Status: Cari span status (success/pending/failed)
+            status_span = col1.find("span", class_=lambda x: x and "text-[10px] uppercase" in x and "rounded-md" in x)
+            status = status_span.get_text(strip=True) if status_span else "N/A"
+            
+            # Kita hanya ingin memproses pesan yang sudah sukses
+            if status.lower() != 'success':
+                 continue
+            
+            # A. Phone Number: Class: font-mono ... group-hover:text-blue-400
+            phone_span = col1.find("span", class_=lambda x: x and "font-mono text-white font-bold text-lg" in x)
+            phone_number_raw = phone_span.get_text(strip=True) if phone_span else "N/A"
+            phone = clean_phone_number(phone_number_raw)
+            
+            # B. Raw Message dan OTP (Div dengan badge OTP)
+            # Div yang berisi pesan lengkap adalah yang memiliki class 'bg-slate-800 border border-slate-700'
+            message_div = col1.find("div", class_=lambda x: x and "bg-slate-800 border" in x and "rounded-l-md" in x)
+            
+            if not message_div:
+                print(f"⚠️ Warning: 'success' status found for {phone}, but message div is missing.")
+                continue
+            
+            # Ambil seluruh teks dari div pesan
+            # Contoh: <#> 753735 — your code for Facebook Laz+nxCarLW
+            raw_message_full = message_div.get_text(strip=True, separator=' ')
+            
+            # Pisahkan pesan penuh dari OTP dan simbol awal (<#> 753735 — )
+            if '—' in raw_message_full:
+                raw_message_clean = raw_message_full.split('—', 1)[1].strip()
+            else:
+                raw_message_clean = raw_message_full # Fallback jika format berubah
+            
+            
+            # C. OTP (Ekstraksi dari teks mentah full, menggunakan fungsi yang diperbarui)
+            otp = extract_otp_from_text(raw_message_full)
                     
-                # D. Range/Country
-                tds = r.find_all("td")
-                range_text = "N/A"
-                if len(tds) > 1:
-                    range_badge = tds[1].find("span", class_="badge")
-                    if range_badge:
-                        range_text = range_badge.get_text(strip=True)
-                
-                # E. Service 
-                service_raw = raw_message_original.split(':', 1)[0] if raw_message_original != 'N/A' and ':' in raw_message_original else 'Unknown'
-                service = clean_service_name(service_raw)
-                
-                # --- Simpan Hasil ---
-                if otp and phone != 'N/A':
-                    messages.append({
-                        "otp": otp,
-                        "phone": phone,
-                        "service": service,
-                        "range": range_text,
-                        "timestamp": datetime.now().strftime("%H:%M:%S"),
-                        "raw_message": raw_message_clean 
-                    })
+            # D. Range/Country (Kolom kedua)
+            # Class: text-slate-200 font-medium
+            range_span = tds[1].find("span", class_="text-slate-200 font-medium")
+            range_text = range_span.get_text(strip=True) if range_span else "N/A"
+            
+            # E. Service 
+            # Ambil kata pertama (atau beberapa kata) dari pesan bersih untuk menentukan service
+            service_raw = raw_message_clean.split(' ', 1)[0] if raw_message_clean != 'N/A' and raw_message_clean else 'Unknown'
+            service = clean_service_name(service_raw)
+            
+            # --- Simpan Hasil ---
+            if otp and phone != 'N/A':
+                messages.append({
+                    "otp": otp,
+                    "phone": phone,
+                    "service": service,
+                    "range": range_text,
+                    "timestamp": datetime.now().strftime("%H:%M:%S"),
+                    "raw_message": raw_message_clean 
+                })
         return messages
     
     async def soft_refresh(self): 
@@ -545,8 +594,9 @@ class SMSMonitor:
 
         screenshot_filename = f"screenshot_{int(time.time())}.png"
         try:
+            # Pastikan berada di dashboard sebelum reload dan screenshot
             if self.page.url != self.url:
-                await self.page.goto(self.url, wait_until='networkidle')
+                await self.page.goto(self.url, wait_until='domcontentloaded')
                 
             print("🔄 Performing page reload...")
             await self.page.reload(wait_until='networkidle') 
@@ -628,13 +678,16 @@ def check_cmd(stats):
                 if AWAITING_CREDENTIALS:
                     
                     # Split berdasarkan newline atau spasi
+                    # Mengatasi format yang mungkin dikirim Admin (satu baris dipisah spasi atau dua baris dipisah newline)
                     parts = text.split() 
+                    if len(parts) != 2 and '\n' in text:
+                        parts = text.split('\n')
                     
                     # Cek jika formatnya (email\npassword) atau (email password)
                     if len(parts) == 2:
                         
-                        username_input = parts[0]
-                        password_input = parts[1]
+                        username_input = parts[0].strip()
+                        password_input = parts[1].strip()
                         
                         monitor._temp_username = username_input
                         monitor._temp_password = password_input
@@ -669,12 +722,10 @@ def check_cmd(stats):
                         
                 elif text.lower() == "/login": 
                     
-                    # LOGIC: Cek status login berdasarkan URL terakhir
                     if monitor.is_logged_in:
                          send_tg("✅ <b>Anda Sudah login</b>. Silahkan kirim perintah <code>/startnew</code>", target_chat_id=chat_id)
                          continue
                          
-                    # Jika belum login, lanjutkan ke alur AWAITING_CREDENTIALS
                     AWAITING_CREDENTIALS = True
                     send_tg(
                         "🔒 <b>Mode Kredensial Aktif</b>\n\n"
@@ -708,6 +759,7 @@ async def monitor_sms_loop():
     
     async with async_playwright() as p:
         try:
+            # PENTING: Perlu memastikan Chrome/Edge berjalan dengan --remote-debugging-port=9222
             await monitor.initialize(p)
         except Exception as e:
             print(f"FATAL ERROR: Failed to initialize SMSMonitor (Playwright/Browser connection). {e}")
@@ -730,7 +782,6 @@ async def monitor_sms_loop():
 
         while True:
             try:
-                # NEW: Update login status based on current URL (asynchronous)
                 await monitor.check_url_login_status() 
 
                 # Cek: Harus monitoring_active DAN harus is_logged_in
@@ -738,6 +789,7 @@ async def monitor_sms_loop():
                     
                     msgs = await monitor.fetch_sms()
                     
+                    # Filter dan tambahkan ke cache
                     new = otp_filter.filter(msgs)
 
                     if new:
@@ -754,8 +806,6 @@ async def monitor_sms_loop():
                             
                             await asyncio.sleep(2) 
                         
-                        print("ℹ️ ALL automatic refresh functions are disabled. Use /refresh command.")
-                        
                 elif BOT_STATUS["monitoring_active"] and not monitor.is_logged_in:
                     print("⚠️ Monitoring active but paused. Awaiting successful login...")
                     
@@ -768,8 +818,10 @@ async def monitor_sms_loop():
                 print(error_message)
 
             stats = update_global_status()
+            # Cek perintah dari Telegram
             check_cmd(stats)
             
+            # Waktu tunggu antara cek (misal: 5 detik)
             await asyncio.sleep(5) 
 
 # ================= FLASK WEB SERVER UNTUK API DAN DASHBOARD =================
@@ -778,7 +830,8 @@ app = Flask(__name__, template_folder='templates')
 
 @app.route('/', methods=['GET'])
 def index():
-    return render_template('dashboard.html')
+    # Pastikan Anda memiliki file templates/dashboard.html
+    return render_template('dashboard.html') 
 
 @app.route('/api/status', methods=['GET'])
 def get_status_json():
@@ -794,6 +847,7 @@ def manual_check():
         return jsonify({"message": "Error: Not logged in. Please /login first via Telegram or login manually."}), 400
         
     try:
+        # Jalankan coroutine di event loop utama
         asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(admin_chat_id=ADMIN_ID), GLOBAL_ASYNC_LOOP)
         return jsonify({"message": "Halaman X.MNIT Network Refresh & Screenshot sedang dikirim ke Admin Telegram."})
     except RuntimeError as e:
@@ -821,6 +875,7 @@ def clear_otp_cache_route():
     otp_filter._save()
     
     update_global_status() 
+    send_tg(f"🗑️ <b>OTP Cache Cleared Manually</b>. Cache size: <code>{BOT_STATUS['cache_size']} items</code>", target_chat_id=ADMIN_ID)
     return jsonify({"message": f"OTP Cache cleared manually. New size: {BOT_STATUS['cache_size']}."})
 
 @app.route('/test-message', methods=['GET'])
@@ -842,11 +897,13 @@ def test_message_route():
 @app.route('/start-monitor', methods=['GET'])
 def start_monitor_route():
     BOT_STATUS["monitoring_active"] = True
+    send_tg("▶️ Monitoring started/resumed via Dashboard API.", target_chat_id=ADMIN_ID)
     return jsonify({"message": "Monitor status set to Running."})
 
 @app.route('/stop-monitor', methods=['GET'])
 def stop_monitor_route():
     BOT_STATUS["monitoring_active"] = False
+    send_tg("⏸️ Monitoring paused via Dashboard API.", target_chat_id=ADMIN_ID)
     return jsonify({"message": "Monitor status set to Paused."})
 
 
@@ -859,11 +916,11 @@ def run_flask():
     global GLOBAL_ASYNC_LOOP
     if GLOBAL_ASYNC_LOOP and not asyncio._get_running_loop():
         asyncio.set_event_loop(GLOBAL_ASYNC_LOOP) 
-        print(f"✅ Async loop successfully set for Flask thread: {current_thread().name}")
         
     print(f"✅ Flask API & Dashboard running on http://127.0.0.1:{port}")
     
-    app.run(host='127.0.0.1', port=port, debug=False, use_reloader=False)
+    # Perubahan: Menggunakan 0.0.0.0 agar dapat diakses dari luar localhost (jika perlu untuk ngrok)
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
     if not BOT or not CHAT or not ADMIN_ID:
@@ -872,9 +929,9 @@ if __name__ == "__main__":
         print("Starting SMS Monitor Bot and Flask API...")
         
         print("\n=======================================================")
-        print("     ⚠️  PENTING: JALANKAN NGROK DI TERMINAL LAIN  ⚠️")
-        print("     Setelah bot ini running, buka terminal baru dan:")
-        print("     ngrok http 5000")
+        print("     ⚠️  PENTING: JALANKAN CHROME/EDGE TERPISAH   ⚠️")
+        print("     Gunakan perintah ini di terminal terpisah:")
+        print('     chrome.exe --remote-debugging-port=9222 --user-data-dir="C:\\temp\\playwright_profile"')
         print("=======================================================\n")
 
         try:
