@@ -32,6 +32,13 @@ except (ValueError, TypeError):
     print("⚠️ WARNING: TELEGRAM_ADMIN_ID tidak valid. Perintah admin dinonaktifkan.")
     ADMIN_ID = None
 
+# --- X.MNIT Network Configuration (Loaded from .env) ---
+MNIT_USERNAME = os.getenv("MNIT_USERNAME")
+MNIT_PASSWORD = os.getenv("MNIT_PASSWORD")
+LOGIN_URL = "https://x.mnitnetwork.com/mauth/login" 
+DASHBOARD_URL = "https://x.mnitnetwork.com/mdashboard/getnum" 
+# -----------------------------------------------------------------
+
 LAST_ID = 0
 
 # ================= Konfigurasi File Path =================
@@ -117,7 +124,7 @@ def format_otp_message(otp_data: Dict[str, Any]) -> str:
     masked_phone = mask_phone_number(phone, visible_start=4, visible_end=4)
     service = otp_data.get('service', 'Unknown')
     range_text = otp_data.get('range', 'N/A')
-    timestamp = otp_data.get('timestamp', datetime.now().strftime('%H:%M:%S'))
+    # timestamp = otp_data.get('timestamp', datetime.now().strftime('%H:%M:%S'))
     full_message = otp_data.get('raw_message', 'N/A')
     
     # Menambahkan emoji bendera
@@ -170,6 +177,7 @@ def get_status_message(stats):
     return f"""🤖 <b>Bot Status</b>
 
 ⚡ Status: <b>{stats['status']}</b>
+🌐 Login Status: <b>{'✅ Logged In' if monitor.is_logged_in else '❌ Awaiting Login'}</b>
 ⏱️ Uptime: {stats['uptime']}
 📨 Total OTPs Sent: <b>{stats['total_otps_sent']}</b>
 🔍 Last Check: {stats['last_check']}
@@ -354,13 +362,14 @@ def send_photo_tg(photo_path, caption="", target_chat_id=None):
         return False
 
 # ================= Scraper & Monitor Class (PLAYWRIGHT ADAPTATION) =================
-URL = "https://v2.mnitnetwork.com/dashboard/getnum" 
 
 class SMSMonitor:
-    def __init__(self, url=URL):
+    
+    def __init__(self, url=DASHBOARD_URL): 
         self.url = url
         self.browser = None
         self.page = None
+        self.is_logged_in = False # Status login
 
     async def initialize(self, p_instance):
         
@@ -370,17 +379,80 @@ class SMSMonitor:
         # 2. Ambil context pertama 
         context = self.browser.contexts[0]
         
-        # 3. Buat page baru dan navigasi ke URL
+        # 3. Buat page baru
         self.page = await context.new_page()
-        await self.page.goto(self.url, wait_until='networkidle') 
         
         print("✅ Playwright page connected successfully.")
 
+    async def login(self):
+        """Melakukan proses login ke X.MNITNetwork."""
+        if not self.page:
+            raise Exception("Page not initialized for login.")
+        if not MNIT_USERNAME or not MNIT_PASSWORD:
+            raise Exception("Login credentials (MNIT_USERNAME/MNIT_PASSWORD) not found in .env.")
+            
+        print(f"Attempting to navigate to login page: {LOGIN_URL}")
+        await self.page.goto(LOGIN_URL, wait_until='networkidle') 
+        
+        # 1. Isi Username (asumsi field name 'email')
+        print("Filling in username...")
+        await self.page.fill('input[name="email"]', MNIT_USERNAME)
+        
+        # 2. Isi Password (asumsi field name 'password')
+        print("Filling in password...")
+        await self.page.fill('input[name="password"]', MNIT_PASSWORD)
+        
+        # 3. Klik Tombol Login
+        print("Clicking login button...")
+        # Asumsi tombol login adalah submit, bisa diganti dengan selector yang lebih spesifik
+        await self.page.click('button[type="submit"]') 
+        
+        # 4. Tunggu navigasi ke dashboard (atau halaman setelah login)
+        try:
+            # Tunggu hingga navigasi ke DASHBOARD_URL atau timeout
+            await self.page.wait_for_url(DASHBOARD_URL, timeout=20000) # Timeout 20 detik
+            self.is_logged_in = True
+            print("✅ Login successful, navigated to dashboard.")
+            return True
+        except Exception as e:
+            self.is_logged_in = False
+            error_msg = f"❌ Login failed or did not navigate to dashboard within 20s. Error: {e}"
+            print(error_msg)
+            # Ambil screenshot jika login gagal
+            screenshot_filename = f"login_fail_{int(time.time())}.png"
+            await self.page.screenshot(path=screenshot_filename, full_page=True)
+            send_photo_tg(screenshot_filename, f"⚠️ Gagal Login ke X.MNITNetwork.", target_chat_id=ADMIN_ID)
+            os.remove(screenshot_filename)
+            raise Exception(error_msg)
+
+    async def login_and_notify(self, admin_chat_id):
+        """Wrapper untuk login dan mengirim notifikasi ke admin."""
+        try:
+            success = await self.login()
+            if success:
+                # Mengirim screenshot DASHBOARD setelah login berhasil
+                await self.refresh_and_screenshot(admin_chat_id)
+                send_tg(f"✅ Login berhasil! Sekarang Anda dapat memulai monitoring dengan perintah: /startnew", target_chat_id=admin_chat_id)
+            
+        except Exception as e:
+            send_tg(f"❌ Login GAGAL. Error: `{e.__class__.__name__}: {e}`", target_chat_id=admin_chat_id)
+            self.is_logged_in = False
+
     async def fetch_sms(self) -> List[Dict[str, Any]]:
-        if not self.page: 
-            print("⚠️ ERROR: Page not initialized during fetch_sms.")
+        if not self.page or not self.is_logged_in: 
+            print("⚠️ ERROR: Page not initialized or not logged in during fetch_sms.")
             return []
             
+        # PENTING: Navigasi ke DASHBOARD_URL jika belum berada di sana
+        if self.page.url != self.url:
+            print(f"Navigating to dashboard URL: {self.url}")
+            try:
+                await self.page.goto(self.url, wait_until='networkidle', timeout=15000)
+            except Exception as e:
+                print(f"❌ Error navigating to dashboard: {e}")
+                return []
+
+
         # Menggunakan Playwright untuk mendapatkan konten
         html = await self.page.content()
         soup = BeautifulSoup(html, "html.parser")
@@ -402,6 +474,7 @@ class SMSMonitor:
                 
                 # LOGIKA PENGAMBILAN PESAN PENUH MENTAH 
                 if ':' in raw_message_original and raw_message_original != 'N/A':
+                    # Ambil bagian setelah ':' (biasanya isi pesan)
                     raw_message_clean = raw_message_original.split(':', 1)[1].strip()
                 else:
                     raw_message_clean = raw_message_original
@@ -440,33 +513,36 @@ class SMSMonitor:
         return messages
     
     async def soft_refresh(self): 
-        """Memuat ulang halaman tanpa screenshot atau notifikasi Telegram."""
-        if not self.page: 
-            print("❌ Error: Page not initialized for soft refresh.")
+        """Memuat ulang halaman."""
+        if not self.page or not self.is_logged_in: 
+            print("❌ Error: Page not initialized or not logged in for soft refresh.")
             return
 
         try:
             print("🔄 Performing soft page refresh...")
-            # Menggunakan reload untuk refresh secara penuh, karena soft refresh 1 menit sudah dihapus
             await self.page.reload(wait_until='networkidle') 
             print("✅ Soft refresh complete.")
         except Exception as e:
             print(f"❌ Error during soft refresh: {e}")
 
     async def refresh_and_screenshot(self, admin_chat_id): 
-        if not self.page:
-            print("❌ Error: Page not initialized for refresh/screenshot.")
-            send_tg(f"⚠️ **Error Refresh/Screenshot**: Gagal inisialisasi koneksi browser.", target_chat_id=admin_chat_id)
+        if not self.page or not self.is_logged_in:
+            print("❌ Error: Page not initialized/not logged in for refresh/screenshot.")
+            send_tg(f"⚠️ **Error Refresh/Screenshot**: Gagal inisialisasi/belum login.", target_chat_id=admin_chat_id)
             return False
 
         screenshot_filename = f"screenshot_{int(time.time())}.png"
         try:
-            print("🔄 Performing page refresh...")
+            # Pastikan navigasi ke dashboard sebelum refresh/screenshot
+            if self.page.url != self.url:
+                await self.page.goto(self.url, wait_until='networkidle')
+                
+            print("🔄 Performing page reload...")
             await self.page.reload(wait_until='networkidle') 
             print(f"📸 Taking screenshot: {screenshot_filename}")
             await self.page.screenshot(path=screenshot_filename, full_page=True)
             print("📤 Sending screenshot to Admin Telegram...")
-            caption = f"✅ Page Refreshed successfully at {datetime.now().strftime('%H:%M:%S')}\n\n<i>Pesan OTP di halaman telah dihapus.</i>"
+            caption = f"✅ Page Reloaded successfully at {datetime.now().strftime('%H:%M:%S')}"
             success = send_photo_tg(screenshot_filename, caption, target_chat_id=admin_chat_id)
             return success
         except Exception as e:
@@ -490,7 +566,7 @@ BOT_STATUS = {
     "total_otps_sent": 0,
     "last_check": "Never",
     "cache_size": 0,
-    "monitoring_active": True,
+    "monitoring_active": False, # Diubah menjadi False di awal
     "last_cleanup_gmt_date": "N/A"
 }
 
@@ -504,7 +580,7 @@ def update_global_status():
     BOT_STATUS["last_check"] = datetime.now().strftime("%H:%M:%S")
     BOT_STATUS["cache_size"] = len(otp_filter.cache)
     BOT_STATUS["monitoring_active"] = BOT_STATUS["monitoring_active"] 
-    BOT_STATUS["status"] = "Running" if BOT_STATUS["monitoring_active"] else "Paused"
+    BOT_STATUS["status"] = "Running" if BOT_STATUS["monitoring_active"] and monitor.is_logged_in else ("Paused (Logged In)" if monitor.is_logged_in else "Paused (Not Logged In)")
     BOT_STATUS["last_cleanup_gmt_date"] = otp_filter.last_cleanup_date_gmt 
     
     return BOT_STATUS
@@ -513,6 +589,7 @@ def update_global_status():
 
 def check_cmd(stats):
     global LAST_ID
+    global BOT_STATUS
     if ADMIN_ID is None: return
 
     try:
@@ -541,6 +618,25 @@ def check_cmd(stats):
                         asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(admin_chat_id=chat_id), GLOBAL_ASYNC_LOOP)
                     else:
                         send_tg("❌ Loop error: Global loop not set.", target_chat_id=chat_id)
+                        
+                elif text == "/login":
+                    send_tg("⏳ Executing login to X.MNITNetwork...", with_inline_keyboard=False, target_chat_id=chat_id)
+                    if GLOBAL_ASYNC_LOOP:
+                        # Menjalankan fungsi login
+                        asyncio.run_coroutine_threadsafe(monitor.login_and_notify(admin_chat_id=chat_id), GLOBAL_ASYNC_LOOP)
+                    else:
+                        send_tg("❌ Loop error: Global loop not set.", target_chat_id=chat_id)
+                        
+                elif text == "/startnew":
+                    if monitor.is_logged_in:
+                        BOT_STATUS["monitoring_active"] = True
+                        send_tg("✅ Monitoring started/resumed. Checking for new OTPs...", target_chat_id=chat_id)
+                    else:
+                        send_tg("❌ Cannot start monitoring: Please use /login first.", target_chat_id=chat_id)
+                
+                elif text == "/stop":
+                    BOT_STATUS["monitoring_active"] = False
+                    send_tg("⏸️ Monitoring paused. Use /startnew to resume.", target_chat_id=chat_id)
 
     except requests.exceptions.RequestException as e:
         print(f"❌ Error during getUpdates: {e}")
@@ -550,7 +646,6 @@ def check_cmd(stats):
 async def monitor_sms_loop():
     global total_sent
     global BOT_STATUS
-    #last_soft_refresh_time = time.time() # Variabel ini tidak lagi digunakan
     
     # 1. Gunakan async_playwright context manager
     async with async_playwright() as p:
@@ -563,15 +658,15 @@ async def monitor_sms_loop():
             BOT_STATUS["status"] = "FATAL ERROR"
             return 
     
-        BOT_STATUS["monitoring_active"] = True
+        # Awal, monitoring non-aktif
+        BOT_STATUS["monitoring_active"] = False 
+        
+        # Kirim pesan awal dan minta login (sudah dikirim di __main__)
 
         while True:
             try:
-                if BOT_STATUS["monitoring_active"]:
-                    
-                    # =========================================================
-                    # !!! SOFT REFRESH OTOMATIS (SETIAP 1 MENIT) DIHAPUS !!!
-                    # =========================================================
+                # Cek: Harus login DULU dan monitoring harus aktif
+                if BOT_STATUS["monitoring_active"] and monitor.is_logged_in:
                     
                     msgs = await monitor.fetch_sms()
                     
@@ -594,9 +689,11 @@ async def monitor_sms_loop():
                             
                             await asyncio.sleep(2) 
                         
-                        # Refresh otomatis DENGAN SCREENSHOT telah dihapus
                         print("ℹ️ ALL automatic refresh functions are disabled. Use /refresh command.")
                         
+                elif not monitor.is_logged_in:
+                    print("⚠️ Monitoring paused. Awaiting /login command.")
+                    
                 else:
                     print("⏸️ Monitoring paused.")
 
@@ -635,11 +732,13 @@ def manual_check():
     if ADMIN_ID is None: return jsonify({"message": "Error: Admin ID not configured for this action."}), 400
     if GLOBAL_ASYNC_LOOP is None:
         return jsonify({"message": "Error: Asyncio loop not initialized."}), 500
+    if not monitor.is_logged_in:
+        return jsonify({"message": "Error: Not logged in. Please /login first via Telegram or login manually."}), 400
         
     try:
         # Menjalankan fungsi asinkron (refresh_and_screenshot) di thread aman
         asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(admin_chat_id=ADMIN_ID), GLOBAL_ASYNC_LOOP)
-        return jsonify({"message": "Halaman MNIT Network Refresh & Screenshot sedang dikirim ke Admin Telegram."})
+        return jsonify({"message": "Halaman X.MNIT Network Refresh & Screenshot sedang dikirim ke Admin Telegram."})
     except RuntimeError as e:
         return jsonify({"message": f"Fatal Error: Asyncio loop issue ({e.__class__.__name__}). Cek log RDP Anda."}), 500
     except Exception as e:
@@ -692,6 +791,8 @@ def test_message_route():
 
 @app.route('/start-monitor', methods=['GET'])
 def start_monitor_route():
+    if not monitor.is_logged_in:
+        return jsonify({"message": "Monitor cannot start. Please login first."}), 400
     BOT_STATUS["monitoring_active"] = True
     return jsonify({"message": "Monitor status set to Running."})
 
@@ -709,6 +810,7 @@ def run_flask():
     
     global GLOBAL_ASYNC_LOOP
     if GLOBAL_ASYNC_LOOP and not asyncio._get_running_loop():
+        # Menetapkan loop ke thread Flask, jika loop sudah dibuat di main thread
         asyncio.set_event_loop(GLOBAL_ASYNC_LOOP) 
         print(f"✅ Async loop successfully set for Flask thread: {current_thread().name}")
         
@@ -717,8 +819,8 @@ def run_flask():
     app.run(host='127.0.0.1', port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
-    if not BOT or not CHAT:
-        print("FATAL ERROR: Pastikan TELEGRAM_BOT_TOKEN dan TELEGRAM_CHAT_ID ada di file .env.")
+    if not BOT or not CHAT or not ADMIN_ID:
+        print("FATAL ERROR: Pastikan TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, dan TELEGRAM_ADMIN_ID ada di file .env.")
     else:
         print("Starting SMS Monitor Bot and Flask API...")
         
@@ -741,8 +843,16 @@ if __name__ == "__main__":
         flask_thread.daemon = True
         flask_thread.start()
         
-        # 2. Kirim Pesan Aktivasi Telegram 
-        send_tg("✅ <b>BOT V2.MNIT ACTIVE MONITORING IS RUNNING.</b>", with_inline_keyboard=False)
+        # 2. Kirim Pesan Aktivasi Telegram
+        # Sertakan instruksi untuk Admin
+        initial_msg = (
+            "✅ <b>BOT X.MNIT ACTIVE MONITORING IS RUNNING.</b>\n\n"
+            "⚠️ **PERHATIAN**: Monitoring saat ini **PAUSED** dan belum login.\n\n"
+            "Silakan gunakan perintah admin berikut:\n"
+            "1. **Login**: `/login` (untuk masuk ke dashboard X.MNIT)\n"
+            "2. **Mulai Monitoring**: `/startnew` (setelah login berhasil)"
+        )
+        send_tg(initial_msg, with_inline_keyboard=False, target_chat_id=ADMIN_ID)
         
         # 3. Mulai loop asinkron monitoring
         try:
