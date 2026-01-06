@@ -44,8 +44,9 @@ OTP_SAVE_FOLDER = os.path.join("..", "get")
 OTP_SAVE_FILE = os.path.join(OTP_SAVE_FOLDER, "smc.json")
 # ---------------------------------------------------------
 
-# ================= Global State for Asyncio Loop =================
+# ================= Global State for Asyncio Loop & Command =================
 GLOBAL_ASYNC_LOOP = None 
+AWAITING_CREDENTIALS = False # NEW: State untuk menunggu input email/password dari Admin
 
 # ================= Utils =================
 
@@ -192,7 +193,7 @@ def save_otp_to_json(otp_data: Dict[str, Any]):
     except Exception as e:
         print(f"❌ ERROR: Failed to save OTP to JSON file {OTP_SAVE_FILE}: {e}")
 
-# ================= OTP Filter Class (tetap sama) =================
+# ================= OTP Filter Class =================
 
 class OTPFilter:
     
@@ -260,7 +261,7 @@ class OTPFilter:
 
 otp_filter = OTPFilter()
 
-# ================= Telegram Functionality (tetap sama) =================
+# ================= Telegram Functionality =================
 
 def send_tg(text, with_inline_keyboard=False, target_chat_id=None):
     chat_id_to_use = target_chat_id if target_chat_id is not None else CHAT
@@ -305,7 +306,7 @@ def send_photo_tg(photo_path, caption="", target_chat_id=None):
         print(f"❌ Unknown Error in send_photo_tg: {e}")
         return False
 
-# ================= Scraper & Monitor Class (PLAYWRIGHT ADAPTATION) =================
+# ================= Scraper & Monitor Class =================
 
 class SMSMonitor:
     
@@ -314,8 +315,8 @@ class SMSMonitor:
         self.browser = None
         self.page = None
         self.is_logged_in = False 
-        self._temp_username = None # NEW: Simpan kredensial di memori
-        self._temp_password = None # NEW: Simpan kredensial di memori
+        self._temp_username = None 
+        self._temp_password = None 
 
     async def initialize(self, p_instance):
         
@@ -335,27 +336,26 @@ class SMSMonitor:
         if not self.page:
             raise Exception("Page not initialized for login.")
         
-        # --- PERUBAHAN: Ambil kredensial dari memori ---
         USERNAME = self._temp_username
         PASSWORD = self._temp_password
         
         if not USERNAME or not PASSWORD:
-            raise Exception("Login credentials not provided via /login command.")
-        # -----------------------------------------------
-
+            # Perlu diperhatikan: Jika kredensial sudah dibersihkan setelah login sukses
+            raise Exception("Login credentials not found in memory. Please use /login command first.")
+        
         print(f"Attempting to navigate to login page: {LOGIN_URL}")
         await self.page.goto(LOGIN_URL, wait_until='networkidle') 
         
         # 1. Isi Username
-        print("Filling in username...")
-        await self.page.fill('input[name="email"]', USERNAME) 
+        # Selector menggunakan atribut type="email" atau placeholder
+        await self.page.fill('input[type="email"]', USERNAME) 
         
         # 2. Isi Password
-        print("Filling in password...")
-        await self.page.fill('input[name="password"]', PASSWORD) 
+        # Selector menggunakan atribut type="password" atau placeholder
+        await self.page.fill('input[type="password"]', PASSWORD) 
         
         # 3. Klik Tombol Login
-        print("Clicking login button...")
+        # Selector menggunakan atribut type="submit"
         await self.page.click('button[type="submit"]') 
         
         # 4. Tunggu navigasi ke dashboard
@@ -363,10 +363,10 @@ class SMSMonitor:
             await self.page.wait_for_url(DASHBOARD_URL, timeout=20000) 
             self.is_logged_in = True
             
-            # --- PENTING: Bersihkan kredensial dari memori setelah sukses ---
+            # --- Bersihkan kredensial dari memori setelah sukses ---
             self._temp_username = None 
             self._temp_password = None
-            # ----------------------------------------------------------------
+            # ------------------------------------------------------
             
             print("✅ Login successful, navigated to dashboard.")
             return True
@@ -403,7 +403,6 @@ class SMSMonitor:
             print("⚠️ ERROR: Page not initialized or not logged in during fetch_sms.")
             return []
             
-        # Navigasi ke DASHBOARD_URL jika belum berada di sana
         if self.page.url != self.url:
             print(f"Navigating to dashboard URL: {self.url}")
             try:
@@ -413,7 +412,6 @@ class SMSMonitor:
                 return []
 
 
-        # Menggunakan Playwright untuk mendapatkan konten
         html = await self.page.content()
         soup = BeautifulSoup(html, "html.parser")
         messages = []
@@ -537,9 +535,13 @@ def update_global_status():
     BOT_STATUS["last_check"] = datetime.now().strftime("%H:%M:%S")
     BOT_STATUS["cache_size"] = len(otp_filter.cache)
     BOT_STATUS["monitoring_active"] = BOT_STATUS["monitoring_active"] 
-    BOT_STATUS["status"] = "Running" if BOT_STATUS["monitoring_active"] and monitor.is_logged_in else ("Paused (Logged In)" if monitor.is_logged_in else "Paused (Not Logged In)")
+    BOT_STATUS["status"] = "Running" if BOT_STATUS["monitoring_active"] and monitor.is_logged_in else ("Paused (Logged In)" if monitor.is_logged_in and not BOT_STATUS["monitoring_active"] else "Paused (Not Logged In)")
     BOT_STATUS["last_cleanup_gmt_date"] = otp_filter.last_cleanup_date_gmt 
     
+    # Perbarui status jika monitoring aktif tetapi belum login
+    if BOT_STATUS["monitoring_active"] and not monitor.is_logged_in:
+         BOT_STATUS["status"] = "Running (Awaiting Login)"
+         
     return BOT_STATUS
 
 # ================= FUNGSI UTAMA LOOP DAN COMMAND CHECK =================
@@ -547,6 +549,8 @@ def update_global_status():
 def check_cmd(stats):
     global LAST_ID
     global BOT_STATUS
+    global AWAITING_CREDENTIALS
+    
     if ADMIN_ID is None: return
 
     try:
@@ -563,6 +567,38 @@ def check_cmd(stats):
             chat_id = msg.get("chat", {}).get("id")
 
             if user_id == ADMIN_ID:
+                
+                # --- MODE 2: AWAITING CREDENTIALS ---
+                if AWAITING_CREDENTIALS:
+                    
+                    # Split berdasarkan newline atau spasi
+                    parts = text.split() 
+                    
+                    # Cek jika formatnya (email\npassword) atau (email password)
+                    if len(parts) == 2:
+                        
+                        username_input = parts[0]
+                        password_input = parts[1]
+                        
+                        monitor._temp_username = username_input
+                        monitor._temp_password = password_input
+                        AWAITING_CREDENTIALS = False # Selesai menunggu
+                        
+                        send_tg("⏳ Kredensial diterima. Executing login to X.MNITNetwork...", with_inline_keyboard=False, target_chat_id=chat_id)
+                        
+                        if GLOBAL_ASYNC_LOOP:
+                            asyncio.run_coroutine_threadsafe(monitor.login_and_notify(admin_chat_id=chat_id), GLOBAL_ASYNC_LOOP)
+                        else:
+                            send_tg("❌ Loop error: Global loop not set.", target_chat_id=chat_id)
+                            
+                    else:
+                        # Jika Admin mengirim pesan lain saat bot menunggu
+                        send_tg("⚠️ Format kredensial salah. Harap kirim <b>Email/Username dan Password</b> di dua baris terpisah atau dalam satu pesan, contoh:\n<code>muhamadreyhan0073@gmail.com\nfd140206</code>", target_chat_id=chat_id)
+                        
+                    continue # Langsung ke update berikutnya
+
+                # --- MODE 1: COMMAND MODE ---
+                
                 if text == "/status":
                     requests.post(
                         f"https://api.telegram.org/bot{BOT}/sendMessage",
@@ -575,33 +611,24 @@ def check_cmd(stats):
                     else:
                         send_tg("❌ Loop error: Global loop not set.", target_chat_id=chat_id)
                         
-                elif text.startswith("/login"):
-                    parts = text.split()
-                    if len(parts) == 3:
-                        
-                        username_input = parts[1]
-                        password_input = parts[2]
-                        
-                        # Simpan kredensial sementara di memori
-                        monitor._temp_username = username_input
-                        monitor._temp_password = password_input
-                        
-                        send_tg("⏳ Kredensial diterima. Executing login to X.MNITNetwork...", with_inline_keyboard=False, target_chat_id=chat_id)
-                        
-                        if GLOBAL_ASYNC_LOOP:
-                            asyncio.run_coroutine_threadsafe(monitor.login_and_notify(admin_chat_id=chat_id), GLOBAL_ASYNC_LOOP)
-                        else:
-                            send_tg("❌ Loop error: Global loop not set.", target_chat_id=chat_id)
-                            
-                    else:
-                        send_tg("⚠️ Format perintah salah. Gunakan: <code>/login username/email password</code>", target_chat_id=chat_id)
+                elif text.lower() == "/login": 
+                    AWAITING_CREDENTIALS = True
+                    send_tg(
+                        "🔒 **Mode Kredensial Aktif**\n\n"
+                        "Silakan kirim **Email/Username** dan **Password** di dua baris terpisah, atau dalam satu pesan, dengan format berikut:\n\n"
+                        "Contoh:\n"
+                        "<code>muhamadreyhan0073@gmail.com\n"
+                        "fd140206</code>\n\n"
+                        "<i>(Bot akan memproses pesan berikutnya sebagai kredensial)</i>",
+                        target_chat_id=chat_id
+                    )
                         
                 elif text == "/startnew":
+                    BOT_STATUS["monitoring_active"] = True
                     if monitor.is_logged_in:
-                        BOT_STATUS["monitoring_active"] = True
-                        send_tg("✅ Monitoring started/resumed. Checking for new OTPs...", target_chat_id=chat_id)
+                         send_tg("✅ Monitoring started/resumed. Checking for new OTPs...", target_chat_id=chat_id)
                     else:
-                        send_tg("❌ Cannot start monitoring: Please use /login first.", target_chat_id=chat_id)
+                         send_tg("⚠️ Monitoring started, but you are not logged in yet. Please use `/login` to enter credentials.", target_chat_id=chat_id)
                 
                 elif text == "/stop":
                     BOT_STATUS["monitoring_active"] = False
@@ -632,14 +659,15 @@ async def monitor_sms_loop():
             "✅ <b>BOT X.MNIT ACTIVE MONITORING IS RUNNING.</b>\n\n"
             "⚠️ **PERHATIAN**: Monitoring saat ini **PAUSED** dan belum login.\n\n"
             "Silakan gunakan perintah admin berikut:\n"
-            "1. **Login & Kirim Kredensial**: <code>/login username/email password</code>\n" 
-            "2. **Mulai Monitoring**: `/startnew` (setelah login berhasil)"
+            "1. **Login & Kirim Kredensial**: `/login` (Bot akan meminta Email dan Password secara terpisah)\n" 
+            "2. **Mulai Monitoring**: `/startnew` (untuk memulai/melanjutkan cek OTP)"
         )
         send_tg(initial_msg, with_inline_keyboard=False, target_chat_id=ADMIN_ID)
 
 
         while True:
             try:
+                # Cek: Harus monitoring_active DAN harus is_logged_in
                 if BOT_STATUS["monitoring_active"] and monitor.is_logged_in:
                     
                     msgs = await monitor.fetch_sms()
@@ -662,10 +690,10 @@ async def monitor_sms_loop():
                         
                         print("ℹ️ ALL automatic refresh functions are disabled. Use /refresh command.")
                         
-                elif not monitor.is_logged_in:
-                    print("⚠️ Monitoring paused. Awaiting /login command.")
+                elif BOT_STATUS["monitoring_active"] and not monitor.is_logged_in:
+                    print("⚠️ Monitoring active but paused. Awaiting successful login...")
                     
-                else:
+                else: # BOT_STATUS["monitoring_active"] is False
                     print("⏸️ Monitoring paused.")
 
 
@@ -678,7 +706,7 @@ async def monitor_sms_loop():
             
             await asyncio.sleep(5) 
 
-# ================= FLASK WEB SERVER UNTUK API DAN DASHBOARD (tetap sama) =================
+# ================= FLASK WEB SERVER UNTUK API DAN DASHBOARD =================
 
 app = Flask(__name__, template_folder='templates')
 
@@ -747,8 +775,6 @@ def test_message_route():
 
 @app.route('/start-monitor', methods=['GET'])
 def start_monitor_route():
-    if not monitor.is_logged_in:
-        return jsonify({"message": "Monitor cannot start. Please login first."}), 400
     BOT_STATUS["monitoring_active"] = True
     return jsonify({"message": "Monitor status set to Running."})
 
