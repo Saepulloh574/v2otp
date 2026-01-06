@@ -46,7 +46,7 @@ OTP_SAVE_FILE = os.path.join(OTP_SAVE_FOLDER, "smc.json")
 
 # ================= Global State for Asyncio Loop & Command =================
 GLOBAL_ASYNC_LOOP = None 
-AWAITING_CREDENTIALS = False # NEW: State untuk menunggu input email/password dari Admin
+AWAITING_CREDENTIALS = False 
 
 # ================= Utils =================
 
@@ -64,7 +64,6 @@ COUNTRY_EMOJI = {
 }
 
 def get_country_emoji(country_name: str) -> str:
-    """Mengembalikan emoji berdasarkan nama negara/range."""
     return COUNTRY_EMOJI.get(country_name.strip().upper(), "")
 
 def create_inline_keyboard():
@@ -340,27 +339,44 @@ class SMSMonitor:
         PASSWORD = self._temp_password
         
         if not USERNAME or not PASSWORD:
-            # Perlu diperhatikan: Jika kredensial sudah dibersihkan setelah login sukses
             raise Exception("Login credentials not found in memory. Please use /login command first.")
         
-        print(f"Attempting to navigate to login page: {LOGIN_URL}")
-        await self.page.goto(LOGIN_URL, wait_until='networkidle') 
+        # --- PERUBAHAN 1: Navigasi eksplisit dan tunggu selector ---
+        print(f"Attempting to navigate to login page: {LOGIN_URL} (Simulating Human Typing URL)")
         
-        # 1. Isi Username
-        # Selector menggunakan atribut type="email" atau placeholder
-        await self.page.fill('input[type="email"]', USERNAME) 
+        # Mulai dari halaman kosong untuk simulasi human navigation
+        await self.page.goto("about:blank") 
+        # Navigasi ke URL login
+        await self.page.goto(LOGIN_URL, wait_until='load', timeout=15000) 
         
-        # 2. Isi Password
-        # Selector menggunakan atribut type="password" atau placeholder
-        await self.page.fill('input[type="password"]', PASSWORD) 
+        # Tunggu hingga kolom email muncul
+        EMAIL_SELECTOR = 'input[type="email"]'
+        PASSWORD_SELECTOR = 'input[type="password"]'
+        SUBMIT_SELECTOR = 'button[type="submit"]'
+        
+        await self.page.wait_for_selector(EMAIL_SELECTOR, timeout=10000) 
+        # ----------------------------------------
+
+        # 1. Isi Username dengan simulasi Human Typing (delay=100ms)
+        print("Filling in username with human-like delay...")
+        await self.page.click(EMAIL_SELECTOR)
+        await self.page.type(EMAIL_SELECTOR, USERNAME, delay=100) 
+        
+        # 2. Isi Password dengan simulasi Human Typing (delay=100ms)
+        print("Filling in password with human-like delay...")
+        await self.page.click(PASSWORD_SELECTOR)
+        await self.page.type(PASSWORD_SELECTOR, PASSWORD, delay=100)
         
         # 3. Klik Tombol Login
-        # Selector menggunakan atribut type="submit"
-        await self.page.click('button[type="submit"]') 
+        print("Clicking login button...")
+        # Beri jeda sejenak sebelum klik
+        await asyncio.sleep(1) 
+        await self.page.click(SUBMIT_SELECTOR) 
         
         # 4. Tunggu navigasi ke dashboard
         try:
-            await self.page.wait_for_url(DASHBOARD_URL, timeout=20000) 
+            # Tingkatkan timeout untuk mengantisipasi TargetClosedError/slow server
+            await self.page.wait_for_url(DASHBOARD_URL, timeout=30000) 
             self.is_logged_in = True
             
             # --- Bersihkan kredensial dari memori setelah sukses ---
@@ -370,16 +386,22 @@ class SMSMonitor:
             
             print("✅ Login successful, navigated to dashboard.")
             return True
+        
+        # --- Catch Error dan ambil screenshot ---
         except Exception as e:
             self.is_logged_in = False
-            error_msg = f"❌ Login failed or did not navigate to dashboard within 20s. Error: {e}"
+            error_msg = f"❌ Login failed or did not navigate to dashboard within 30s. Error: {e}"
             print(error_msg)
             
-            # Ambil screenshot jika login gagal
             screenshot_filename = f"login_fail_{int(time.time())}.png"
-            await self.page.screenshot(path=screenshot_filename, full_page=True)
-            send_photo_tg(screenshot_filename, f"⚠️ Gagal Login ke X.MNITNetwork. Screenshot diambil:", target_chat_id=ADMIN_ID)
-            os.remove(screenshot_filename)
+            try:
+                # Coba ambil screenshot (bisa gagal jika target sudah ditutup)
+                await self.page.screenshot(path=screenshot_filename, full_page=True)
+                send_photo_tg(screenshot_filename, f"⚠️ Gagal Login ke X.MNITNetwork. Screenshot diambil:", target_chat_id=ADMIN_ID)
+                os.remove(screenshot_filename)
+            except Exception as se:
+                print(f"❌ Gagal mengambil screenshot karena Target Closed/Internal Error: {se.__class__.__name__}")
+                send_tg(f"⚠️ Gagal Login ke X.MNITNetwork. Error: `{e.__class__.__name__}`. Gagal mengambil screenshot karena target ditutup.", target_chat_id=ADMIN_ID)
             
             raise Exception(error_msg)
 
@@ -393,7 +415,6 @@ class SMSMonitor:
                 send_tg(f"✅ Login berhasil! Sekarang Anda dapat memulai monitoring dengan perintah: /startnew", target_chat_id=admin_chat_id)
             
         except Exception as e:
-            # Notifikasi gagal login sudah dikirim di fungsi self.login()
             if not self.is_logged_in:
                  send_tg(f"❌ Login GAGAL (Pastikan kredensial benar). Error: `{e.__class__.__name__}`.", target_chat_id=admin_chat_id)
             self.is_logged_in = False
