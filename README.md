@@ -10,5 +10,11 @@ reg query "HKLM\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" /v Release
 //install
 choco install git -y
 
+/install 
+choco install python -y
+
+//close terminal
+//open terminal
+
 //clone 
 git clone https://github.com/Saepulloh574/v2otp
