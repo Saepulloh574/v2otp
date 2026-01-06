@@ -11,3 +11,4 @@ reg query "HKLM\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" /v Release
 choco install git -y
 
 //clone 
+git clone https://github.com/Saepulloh574/v2otp
