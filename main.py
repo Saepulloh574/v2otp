@@ -112,6 +112,7 @@ def format_otp_message(otp_data: Dict[str, Any]) -> str:
     emoji = get_country_emoji(range_text)
     full_message_escaped = full_message.replace('<', '&lt;').replace('>', '&gt;') 
     
+    # Menggunakan tag <b> dan <code> sesuai permintaan
     return f"""🔐 <b>New OTP Received</b>
 
 🌍 Country: <b>{range_text} {emoji}</b>
@@ -152,15 +153,16 @@ def clean_service_name(service):
     return s
 
 def get_status_message(stats):
+    # Menggunakan tag <b> dan <code>
     return f"""🤖 <b>Bot Status</b>
 
 ⚡ Status: <b>{stats['status']}</b>
 🌐 Login Status: <b>{'✅ Logged In' if monitor.is_logged_in else '❌ Awaiting Login'}</b>
-⏱️ Uptime: {stats['uptime']}
+⏱️ Uptime: <code>{stats['uptime']}</code>
 📨 Total OTPs Sent: <b>{stats['total_otps_sent']}</b>
-🔍 Last Check: {stats['last_check']}
-💾 Cache Size: {stats['cache_size']} items
-📅 Last Cache Reset (GMT): {stats['last_cleanup_gmt_date']}
+🔍 Last Check: <code>{stats['last_check']}</code>
+💾 Cache Size: <code>{stats['cache_size']} items</code>
+📅 Last Cache Reset (GMT): <code>{stats['last_cleanup_gmt_date']}</code>
 
 <i>Bot is running</i>"""
 
@@ -313,7 +315,7 @@ class SMSMonitor:
         self.url = url
         self.browser = None
         self.page = None
-        self.is_logged_in = False # Status login berdasarkan URL
+        self.is_logged_in = False 
         self._temp_username = None 
         self._temp_password = None 
 
@@ -376,9 +378,9 @@ class SMSMonitor:
         PASSWORD_SELECTOR = 'input[type="password"]'
         SUBMIT_SELECTOR = 'button[type="submit"]'
         
+        # Pastikan kolom login muncul sebelum diisi
         await self.page.wait_for_selector(EMAIL_SELECTOR, timeout=10000) 
-        # ----------------------------------------
-
+        
         # 1. Isi Username dengan simulasi Human Typing (delay=100ms)
         print("Filling in username with human-like delay...")
         await self.page.click(EMAIL_SELECTOR)
@@ -392,34 +394,49 @@ class SMSMonitor:
         # 3. Klik Tombol Login
         print("Clicking login button...")
         await asyncio.sleep(1) 
+        
+        # Lakukan klik
         await self.page.click(SUBMIT_SELECTOR) 
         
-        # 4. Tunggu navigasi ke dashboard
+        # 4. TUNGGU VALIDASI LOGIN (Menggunakan URL dan Selector Dashboard)
         try:
-            await self.page.wait_for_url(DASHBOARD_URL, timeout=30000) 
-            self.is_logged_in = True
+            # Tunggu hingga navigasi selesai (bisa ke dashboard atau kembali ke login)
+            await self.page.wait_for_load_state('networkidle', timeout=30000)
             
-            # Bersihkan kredensial dari memori setelah sukses
-            self._temp_username = None 
-            self._temp_password = None
+            current_url = self.page.url
             
-            print("✅ Login successful, navigated to dashboard.")
-            return True
+            # Cek URL: Apakah sudah di halaman dashboard?
+            if current_url.startswith("https://x.mnitnetwork.com/mdashboard"):
+                print("INFO: URL check successful, now on dashboard URL.")
+                # Cek Selector: Pastikan elemen khas dashboard muncul (misal: tabel data)
+                await self.page.wait_for_selector('table', timeout=10000)
+                
+                self.is_logged_in = True
+                self._temp_username = None 
+                self._temp_password = None
+                
+                print("✅ Login successful, navigated to dashboard.")
+                return True
+            else:
+                # Jika URL tidak berubah ke dashboard, berarti login gagal
+                self.is_logged_in = False
+                raise Exception(f"Login Gagal. URL setelah submit: {current_url}")
         
         # --- Catch Error dan ambil screenshot ---
         except Exception as e:
             self.is_logged_in = False
-            error_msg = f"❌ Login failed or did not navigate to dashboard within 30s. Error: {e}"
+            error_msg = f"❌ Login Gagal. Error: {e.__class__.__name__}: {e}"
             print(error_msg)
             
             screenshot_filename = f"login_fail_{int(time.time())}.png"
             try:
+                # Pastikan browser masih terbuka sebelum ambil screenshot
                 await self.page.screenshot(path=screenshot_filename, full_page=True)
-                send_photo_tg(screenshot_filename, f"⚠️ Gagal Login ke X.MNITNetwork. Screenshot diambil:", target_chat_id=ADMIN_ID)
+                send_photo_tg(screenshot_filename, f"⚠️ Gagal Login ke <b>X.MNITNetwork</b>. Screenshot diambil:", target_chat_id=ADMIN_ID)
                 os.remove(screenshot_filename)
             except Exception as se:
-                print(f"❌ Gagal mengambil screenshot karena Target Closed/Internal Error: {se.__class__.__name__}")
-                send_tg(f"⚠️ Gagal Login ke X.MNITNetwork. Error: `{e.__class__.__name__}`. Gagal mengambil screenshot karena target ditutup.", target_chat_id=ADMIN_ID)
+                print(f"❌ Gagal mengambil screenshot: {se.__class__.__name__}")
+                send_tg(f"⚠️ Gagal Login ke <b>X.MNITNetwork</b>. Error: <code>{e.__class__.__name__}</code>. Gagal mengambil screenshot.", target_chat_id=ADMIN_ID)
             
             raise Exception(error_msg)
 
@@ -429,11 +446,11 @@ class SMSMonitor:
             success = await self.login()
             if success:
                 await self.refresh_and_screenshot(admin_chat_id)
-                send_tg(f"✅ Login berhasil! Sekarang Anda dapat memulai monitoring dengan perintah: /startnew", target_chat_id=admin_chat_id)
+                send_tg(f"✅ Login berhasil! Sekarang Anda dapat memulai monitoring dengan perintah: <code>/startnew</code>", target_chat_id=admin_chat_id)
             
         except Exception as e:
             if not self.is_logged_in:
-                 send_tg(f"❌ Login GAGAL (Pastikan kredensial benar). Error: `{e.__class__.__name__}`.", target_chat_id=admin_chat_id)
+                 send_tg(f"❌ Login GAGAL (Pastikan kredensial benar). Error: <code>{e.__class__.__name__}</code>.", target_chat_id=admin_chat_id)
             self.is_logged_in = False
 
     async def fetch_sms(self) -> List[Dict[str, Any]]:
@@ -522,7 +539,7 @@ class SMSMonitor:
     async def refresh_and_screenshot(self, admin_chat_id): 
         if not self.page or not self.is_logged_in:
             print("❌ Error: Page not initialized/not logged in for refresh/screenshot.")
-            send_tg(f"⚠️ **Error Refresh/Screenshot**: Gagal inisialisasi/belum login.", target_chat_id=admin_chat_id)
+            send_tg(f"⚠️ <b>Error Refresh/Screenshot</b>: Gagal inisialisasi/belum login.", target_chat_id=admin_chat_id)
             return False
 
         screenshot_filename = f"screenshot_{int(time.time())}.png"
@@ -535,12 +552,12 @@ class SMSMonitor:
             print(f"📸 Taking screenshot: {screenshot_filename}")
             await self.page.screenshot(path=screenshot_filename, full_page=True)
             print("📤 Sending screenshot to Admin Telegram...")
-            caption = f"✅ Page Reloaded successfully at {datetime.now().strftime('%H:%M:%S')}"
+            caption = f"✅ Page Reloaded successfully at <code>{datetime.now().strftime('%H:%M:%S')}</code>"
             success = send_photo_tg(screenshot_filename, caption, target_chat_id=admin_chat_id)
             return success
         except Exception as e:
             print(f"❌ Error during refresh/screenshot: {e}")
-            send_tg(f"⚠️ **Error Refresh/Screenshot**: `{e.__class__.__name__}: {e}`", target_chat_id=admin_chat_id)
+            send_tg(f"⚠️ <b>Error Refresh/Screenshot</b>: <code>{e.__class__.__name__}: {e}</code>", target_chat_id=admin_chat_id)
             return False
         finally:
             if os.path.exists(screenshot_filename):
@@ -622,7 +639,7 @@ def check_cmd(stats):
                         monitor._temp_password = password_input
                         AWAITING_CREDENTIALS = False # Selesai menunggu
                         
-                        send_tg("⏳ Kredensial diterima. Executing login to X.MNITNetwork...", with_inline_keyboard=False, target_chat_id=chat_id)
+                        send_tg("⏳ Kredensial diterima. Executing login to <b>X.MNITNetwork</b>...", with_inline_keyboard=False, target_chat_id=chat_id)
                         
                         if GLOBAL_ASYNC_LOOP:
                             asyncio.run_coroutine_threadsafe(monitor.login_and_notify(admin_chat_id=chat_id), GLOBAL_ASYNC_LOOP)
@@ -651,16 +668,16 @@ def check_cmd(stats):
                         
                 elif text.lower() == "/login": 
                     
-                    # LOGIC BARU: Cek status login berdasarkan URL terakhir yang dibaca oleh loop async
+                    # LOGIC: Cek status login berdasarkan URL terakhir
                     if monitor.is_logged_in:
-                         send_tg("✅ **Anda Sudah login** Silahkan kirim perintah `/startnew`", target_chat_id=chat_id)
+                         send_tg("✅ <b>Anda Sudah login</b>. Silahkan kirim perintah <code>/startnew</code>", target_chat_id=chat_id)
                          continue
                          
                     # Jika belum login, lanjutkan ke alur AWAITING_CREDENTIALS
                     AWAITING_CREDENTIALS = True
                     send_tg(
-                        "🔒 **Mode Kredensial Aktif**\n\n"
-                        "Silakan kirim **Email/Username** dan **Password** di dua baris terpisah, atau dalam satu pesan, dengan format berikut:\n\n"
+                        "🔒 <b>Mode Kredensial Aktif</b>\n\n"
+                        "<b>Anda belum login</b>. Silakan kirim <b>Email/Username</b> dan <b>Password</b> dengan format berikut:\n\n"
                         "Contoh:\n"
                         "<code>muhamadreyhan0073@gmail.com\n"
                         "fd140206</code>\n\n"
@@ -673,11 +690,11 @@ def check_cmd(stats):
                     if monitor.is_logged_in:
                          send_tg("✅ Monitoring started/resumed. Checking for new OTPs...", target_chat_id=chat_id)
                     else:
-                         send_tg("⚠️ Monitoring started, but you are not logged in yet. Please use `/login` to enter credentials.", target_chat_id=chat_id)
+                         send_tg("⚠️ Monitoring started, but you are not logged in yet. Please use <code>/login</code> to enter credentials.", target_chat_id=chat_id)
                 
                 elif text == "/stop":
                     BOT_STATUS["monitoring_active"] = False
-                    send_tg("⏸️ Monitoring paused. Use /startnew to resume.", target_chat_id=chat_id)
+                    send_tg("⏸️ Monitoring paused. Use <code>/startnew</code> to resume.", target_chat_id=chat_id)
 
     except requests.exceptions.RequestException as e:
         print(f"❌ Error during getUpdates: {e}")
@@ -693,7 +710,7 @@ async def monitor_sms_loop():
             await monitor.initialize(p)
         except Exception as e:
             print(f"FATAL ERROR: Failed to initialize SMSMonitor (Playwright/Browser connection). {e}")
-            send_tg("🚨 **FATAL ERROR**: Gagal terhubung ke Chrome/Playwright. Pastikan Chrome berjalan dengan `--remote-debugging-port=9222`.")
+            send_tg("🚨 <b>FATAL ERROR</b>: Gagal terhubung ke Chrome/Playwright. Pastikan Chrome berjalan dengan <code>--remote-debugging-port=9222</code>.", target_chat_id=ADMIN_ID)
             BOT_STATUS["status"] = "FATAL ERROR"
             return 
     
@@ -702,10 +719,10 @@ async def monitor_sms_loop():
         # Kirim pesan awal dan minta login
         initial_msg = (
             "✅ <b>BOT X.MNIT ACTIVE MONITORING IS RUNNING.</b>\n\n"
-            "⚠️ **PERHATIAN**: Monitoring saat ini **PAUSED** dan belum login.\n\n"
+            "⚠️ <b>PERHATIAN</b>: Monitoring saat ini <b>PAUSED</b> dan belum login.\n\n"
             "Silakan gunakan perintah admin berikut:\n"
-            "1. **Login & Kirim Kredensial**: `/login` (Bot akan meminta Email dan Password secara terpisah)\n" 
-            "2. **Mulai Monitoring**: `/startnew` (untuk memulai/melanjutkan cek OTP)"
+            "1. <b>Login & Kirim Kredensial</b>: <code>/login</code> (Bot akan meminta Email dan Password secara terpisah)\n" 
+            "2. <b>Mulai Monitoring</b>: <code>/startnew</code> (untuk memulai/melanjutkan cek OTP)"
         )
         send_tg(initial_msg, with_inline_keyboard=False, target_chat_id=ADMIN_ID)
 
