@@ -395,50 +395,48 @@ class SMSMonitor:
         print("Clicking login button...")
         await asyncio.sleep(1) 
         
-        # Lakukan klik
-        await self.page.click(SUBMIT_SELECTOR) 
-        
-        # 4. TUNGGU VALIDASI LOGIN (Menggunakan URL dan Selector Dashboard)
+        # 4. TUNGGU VALIDASI LOGIN (Menggunakan Playwright's wait_for_url)
         try:
-            # Tunggu hingga navigasi selesai (bisa ke dashboard atau kembali ke login)
-            await self.page.wait_for_load_state('networkidle', timeout=30000)
+            # Lakukan klik
+            await self.page.click(SUBMIT_SELECTOR) 
+
+            # TUNGGU URL DASHBOARD secara eksplisit (30 detik)
+            print(f"Waiting for dashboard URL: {DASHBOARD_URL}...")
+            # Gunakan regex agar mencakup /mdashboard atau /mdashboard/getnum
+            await self.page.wait_for_url("https://x.mnitnetwork.com/mdashboard**", timeout=30000) 
             
-            current_url = self.page.url
+            # Optional: Tunggu elemen khas dashboard (tabel) untuk memastikan render sukses
+            await self.page.wait_for_selector('table', timeout=10000)
             
-            # Cek URL: Apakah sudah di halaman dashboard?
-            if current_url.startswith("https://x.mnitnetwork.com/mdashboard"):
-                print("INFO: URL check successful, now on dashboard URL.")
-                # Cek Selector: Pastikan elemen khas dashboard muncul (misal: tabel data)
-                await self.page.wait_for_selector('table', timeout=10000)
-                
-                self.is_logged_in = True
-                self._temp_username = None 
-                self._temp_password = None
-                
-                print("✅ Login successful, navigated to dashboard.")
-                return True
-            else:
-                # Jika URL tidak berubah ke dashboard, berarti login gagal
-                self.is_logged_in = False
-                raise Exception(f"Login Gagal. URL setelah submit: {current_url}")
+            self.is_logged_in = True
+            self._temp_username = None 
+            self._temp_password = None
+            
+            print("✅ Login successful, navigated to dashboard.")
+            return True
         
-        # --- Catch Error dan ambil screenshot ---
+        # --- Catch Playwright and other errors ---
         except Exception as e:
             self.is_logged_in = False
-            error_msg = f"❌ Login Gagal. Error: {e.__class__.__name__}: {e}"
+            # Dapatkan URL saat terjadi kegagalan untuk debugging
+            current_url_on_fail = self.page.url if self.page else "N/A"
+            
+            error_detail = str(e).split('\n')[0]
+            error_msg = f"❌ Login Gagal. Error: {e.__class__.__name__}. URL saat Gagal: {current_url_on_fail}. Detail: {error_detail}"
             print(error_msg)
             
             screenshot_filename = f"login_fail_{int(time.time())}.png"
             try:
                 # Pastikan browser masih terbuka sebelum ambil screenshot
                 await self.page.screenshot(path=screenshot_filename, full_page=True)
-                send_photo_tg(screenshot_filename, f"⚠️ Gagal Login ke <b>X.MNITNetwork</b>. Screenshot diambil:", target_chat_id=ADMIN_ID)
+                send_photo_tg(screenshot_filename, f"⚠️ Gagal Login ke <b>X.MNITNetwork</b>. URL saat gagal: <code>{current_url_on_fail}</code>", target_chat_id=ADMIN_ID)
                 os.remove(screenshot_filename)
             except Exception as se:
                 print(f"❌ Gagal mengambil screenshot: {se.__class__.__name__}")
                 send_tg(f"⚠️ Gagal Login ke <b>X.MNITNetwork</b>. Error: <code>{e.__class__.__name__}</code>. Gagal mengambil screenshot.", target_chat_id=ADMIN_ID)
             
-            raise Exception(error_msg)
+            # Raise exception dengan pesan yang lebih spesifik
+            raise Exception(f"Validasi URL Login GAGAL: {current_url_on_fail}")
 
     async def login_and_notify(self, admin_chat_id):
         """Wrapper untuk login dan mengirim notifikasi ke admin."""
@@ -449,8 +447,11 @@ class SMSMonitor:
                 send_tg(f"✅ Login berhasil! Sekarang Anda dapat memulai monitoring dengan perintah: <code>/startnew</code>", target_chat_id=admin_chat_id)
             
         except Exception as e:
-            if not self.is_logged_in:
-                 send_tg(f"❌ Login GAGAL (Pastikan kredensial benar). Error: <code>{e.__class__.__name__}</code>.", target_chat_id=admin_chat_id)
+            # Dapatkan ringkasan error (misal: "Validasi URL Login GAGAL: ...")
+            error_summary = str(e).split('\n')[0] 
+            
+            # Menggunakan pesan yang lebih informatif
+            send_tg(f"❌ Login GAGAL. Error: <code>{error_summary}</code>. Cek screenshot yang baru saja terkirim untuk detail halaman.", target_chat_id=admin_chat_id)
             self.is_logged_in = False
 
     async def fetch_sms(self) -> List[Dict[str, Any]]:
