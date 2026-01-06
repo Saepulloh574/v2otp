@@ -313,7 +313,7 @@ class SMSMonitor:
         self.url = url
         self.browser = None
         self.page = None
-        self.is_logged_in = False 
+        self.is_logged_in = False # Status login berdasarkan URL
         self._temp_username = None 
         self._temp_password = None 
 
@@ -330,6 +330,31 @@ class SMSMonitor:
         
         print("✅ Playwright page connected successfully.")
 
+    async def check_url_login_status(self) -> bool:
+        """
+        Memeriksa dan mengatur status login (self.is_logged_in) 
+        berdasarkan URL saat ini di halaman Playwright.
+        """
+        if not self.page:
+            self.is_logged_in = False
+            return False
+            
+        try:
+            current_url = self.page.url
+        except Exception:
+            # Jika TargetClosedError atau browser error, anggap tidak login
+            self.is_logged_in = False 
+            return False
+        
+        # Logged in jika URL mengarah ke Dashboard
+        if current_url.startswith("https://x.mnitnetwork.com/mdashboard"):
+            self.is_logged_in = True
+        # Sebaliknya, anggap belum login (termasuk di halaman login, base URL, atau URL tak dikenal)
+        else:
+            self.is_logged_in = False
+
+        return self.is_logged_in
+
     async def login(self):
         """Melakukan proses login ke X.MNITNetwork menggunakan kredensial di memori."""
         if not self.page:
@@ -341,15 +366,12 @@ class SMSMonitor:
         if not USERNAME or not PASSWORD:
             raise Exception("Login credentials not found in memory. Please use /login command first.")
         
-        # --- PERUBAHAN 1: Navigasi eksplisit dan tunggu selector ---
+        # --- Navigasi eksplisit dan tunggu selector ---
         print(f"Attempting to navigate to login page: {LOGIN_URL} (Simulating Human Typing URL)")
         
-        # Mulai dari halaman kosong untuk simulasi human navigation
         await self.page.goto("about:blank") 
-        # Navigasi ke URL login
         await self.page.goto(LOGIN_URL, wait_until='load', timeout=15000) 
         
-        # Tunggu hingga kolom email muncul
         EMAIL_SELECTOR = 'input[type="email"]'
         PASSWORD_SELECTOR = 'input[type="password"]'
         SUBMIT_SELECTOR = 'button[type="submit"]'
@@ -369,20 +391,17 @@ class SMSMonitor:
         
         # 3. Klik Tombol Login
         print("Clicking login button...")
-        # Beri jeda sejenak sebelum klik
         await asyncio.sleep(1) 
         await self.page.click(SUBMIT_SELECTOR) 
         
         # 4. Tunggu navigasi ke dashboard
         try:
-            # Tingkatkan timeout untuk mengantisipasi TargetClosedError/slow server
             await self.page.wait_for_url(DASHBOARD_URL, timeout=30000) 
             self.is_logged_in = True
             
-            # --- Bersihkan kredensial dari memori setelah sukses ---
+            # Bersihkan kredensial dari memori setelah sukses
             self._temp_username = None 
             self._temp_password = None
-            # ------------------------------------------------------
             
             print("✅ Login successful, navigated to dashboard.")
             return True
@@ -395,7 +414,6 @@ class SMSMonitor:
             
             screenshot_filename = f"login_fail_{int(time.time())}.png"
             try:
-                # Coba ambil screenshot (bisa gagal jika target sudah ditutup)
                 await self.page.screenshot(path=screenshot_filename, full_page=True)
                 send_photo_tg(screenshot_filename, f"⚠️ Gagal Login ke X.MNITNetwork. Screenshot diambil:", target_chat_id=ADMIN_ID)
                 os.remove(screenshot_filename)
@@ -410,7 +428,6 @@ class SMSMonitor:
         try:
             success = await self.login()
             if success:
-                # Mengirim screenshot DASHBOARD setelah login berhasil
                 await self.refresh_and_screenshot(admin_chat_id)
                 send_tg(f"✅ Login berhasil! Sekarang Anda dapat memulai monitoring dengan perintah: /startnew", target_chat_id=admin_chat_id)
             
@@ -633,6 +650,13 @@ def check_cmd(stats):
                         send_tg("❌ Loop error: Global loop not set.", target_chat_id=chat_id)
                         
                 elif text.lower() == "/login": 
+                    
+                    # LOGIC BARU: Cek status login berdasarkan URL terakhir yang dibaca oleh loop async
+                    if monitor.is_logged_in:
+                         send_tg("✅ **Anda Sudah login** Silahkan kirim perintah `/startnew`", target_chat_id=chat_id)
+                         continue
+                         
+                    # Jika belum login, lanjutkan ke alur AWAITING_CREDENTIALS
                     AWAITING_CREDENTIALS = True
                     send_tg(
                         "🔒 **Mode Kredensial Aktif**\n\n"
@@ -688,6 +712,9 @@ async def monitor_sms_loop():
 
         while True:
             try:
+                # NEW: Update login status based on current URL (asynchronous)
+                await monitor.check_url_login_status() 
+
                 # Cek: Harus monitoring_active DAN harus is_logged_in
                 if BOT_STATUS["monitoring_active"] and monitor.is_logged_in:
                     
