@@ -32,23 +32,20 @@ except (ValueError, TypeError):
     print("⚠️ WARNING: TELEGRAM_ADMIN_ID tidak valid. Perintah admin dinonaktifkan.")
     ADMIN_ID = None
 
-# --- X.MNIT Network Configuration (Loaded from .env) ---
-MNIT_USERNAME = os.getenv("MNIT_USERNAME")
-MNIT_PASSWORD = os.getenv("MNIT_PASSWORD")
+# --- X.MNIT Network Configuration ---
 LOGIN_URL = "https://x.mnitnetwork.com/mauth/login" 
 DASHBOARD_URL = "https://x.mnitnetwork.com/mdashboard/getnum" 
-# -----------------------------------------------------------------
+# ------------------------------------
 
 LAST_ID = 0
 
 # ================= Konfigurasi File Path =================
-# FILE INI DISIMPAN DI FOLDER SELEVEL (../get/)
 OTP_SAVE_FOLDER = os.path.join("..", "get")
 OTP_SAVE_FILE = os.path.join(OTP_SAVE_FOLDER, "smc.json")
 # ---------------------------------------------------------
 
 # ================= Global State for Asyncio Loop =================
-GLOBAL_ASYNC_LOOP = None # Variabel global untuk menyimpan event loop utama
+GLOBAL_ASYNC_LOOP = None 
 
 # ================= Utils =================
 
@@ -69,20 +66,6 @@ def get_country_emoji(country_name: str) -> str:
     """Mengembalikan emoji berdasarkan nama negara/range."""
     return COUNTRY_EMOJI.get(country_name.strip().upper(), "")
 
-def get_local_ip():
-    """Mencari IP address lokal perangkat untuk keperluan fallback."""
-    s = None
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80)) 
-        ip = s.getsockname()[0]
-        return ip
-    except Exception:
-        return "127.0.0.1" 
-    finally:
-        if s:
-            s.close()
-            
 def create_inline_keyboard():
     keyboard = {
         "inline_keyboard": [
@@ -124,13 +107,9 @@ def format_otp_message(otp_data: Dict[str, Any]) -> str:
     masked_phone = mask_phone_number(phone, visible_start=4, visible_end=4)
     service = otp_data.get('service', 'Unknown')
     range_text = otp_data.get('range', 'N/A')
-    # timestamp = otp_data.get('timestamp', datetime.now().strftime('%H:%M:%S'))
     full_message = otp_data.get('raw_message', 'N/A')
     
-    # Menambahkan emoji bendera
     emoji = get_country_emoji(range_text)
-    
-    # Melakukan escaping HTML pada pesan penuh agar Telegram tidak error membaca tag HTML
     full_message_escaped = full_message.replace('<', '&lt;').replace('>', '&gt;') 
     
     return f"""🔐 <b>New OTP Received</b>
@@ -147,7 +126,6 @@ FULL MESSAGES:
 def extract_otp_from_text(text):
     """Fungsi ekstraksi OTP yang fleksibel."""
     if not text: return None
-    # Pola untuk mencari 6, 5, atau 4 digit (memastikan 4 digit bukan tahun)
     patterns = [ r'\b(\d{6})\b', r'\b(\d{5})\b', r'\b(\d{4})\b', r'code[:\s]*(\d+)', r'verification[:\s]*(\d+)', r'otp[:\s]*(\d+)', r'pin[:\s]*(\d+)' ]
     for p in patterns:
         m = re.search(p, text, re.I)
@@ -187,57 +165,42 @@ def get_status_message(stats):
 <i>Bot is running</i>"""
 
 def save_otp_to_json(otp_data: Dict[str, Any]):
-    """
-    Menyimpan data OTP ke file JSON di ../get/smc.json dalam format Array of Objects:
-    [{"Number": "...", "OTP": "...", "FullMessage": "..."}, ...]
-    """
-    
-    # Pastikan folder sudah ada
+    """Menyimpan data OTP ke file JSON di ../get/smc.json."""
     if not os.path.exists(OTP_SAVE_FOLDER):
         os.makedirs(OTP_SAVE_FOLDER)
         
-    # --- Format Data Sesuai Permintaan ---
     data_to_save = {
         "Number": otp_data.get('phone', 'N/A'),
         "OTP": otp_data.get('otp', 'N/A'),
         "FullMessage": otp_data.get('raw_message', 'N/A')
     }
-    # -------------------------------------
     
     try:
-        # 1. Baca data yang sudah ada (jika file ada dan tidak kosong)
         existing_data = []
         if os.path.exists(OTP_SAVE_FILE) and os.stat(OTP_SAVE_FILE).st_size > 0:
             with open(OTP_SAVE_FILE, 'r') as f:
                 try:
-                    # Harapannya data yang sudah ada adalah list/array
                     existing_data = json.load(f)
-                    if not isinstance(existing_data, list):
-                        existing_data = [] # Reset jika format tidak sesuai
-                except json.JSONDecodeError:
-                    existing_data = [] # Reset jika file korup
+                    if not isinstance(existing_data, list): existing_data = []
+                except json.JSONDecodeError: existing_data = []
         
-        # 2. Tambahkan data baru
         existing_data.append(data_to_save)
         
-        # 3. Tulis kembali seluruh list ke file
         with open(OTP_SAVE_FILE, 'w') as f:
             json.dump(existing_data, f, indent=2)
             
     except Exception as e:
         print(f"❌ ERROR: Failed to save OTP to JSON file {OTP_SAVE_FILE}: {e}")
 
-# ================= OTP Filter Class =================
+# ================= OTP Filter Class (tetap sama) =================
 
 class OTPFilter:
     
-    CLEANUP_KEY = '__LAST_CLEANUP_GMT__' # Kunci metadata khusus
+    CLEANUP_KEY = '__LAST_CLEANUP_GMT__' 
 
-    # File cache OTP berada di direktori yang sama dengan main.py
     def __init__(self, file='otp_cache.json'): 
         self.file = file
         self.cache = self._load()
-        # Ambil tanggal pembersihan terakhir dari cache, default ke 19700101 jika belum ada
         self.last_cleanup_date_gmt = self.cache.pop(self.CLEANUP_KEY, '19700101') 
         self._cleanup() 
         print(f"✅ OTP Cache loaded from '{self.file}'. Size after cleanup: {len(self.cache)} items. Last cleanup GMT: {self.last_cleanup_date_gmt}")
@@ -257,66 +220,47 @@ class OTPFilter:
         return {}
         
     def _save(self): 
-        # Tambahkan metadata sebelum menyimpan
         temp_cache = self.cache.copy()
         temp_cache[self.CLEANUP_KEY] = self.last_cleanup_date_gmt
-        # Simpan ke otp_cache.json
         json.dump(temp_cache, open(self.file,'w'), indent=2)
     
     def _cleanup(self):
-        """Membersihkan cache berdasarkan pergantian hari GMT (setelah 23:59:59 GMT)."""
-        
-        # Ambil tanggal hari ini di zona waktu GMT (UTC)
         now_gmt = datetime.now(timezone.utc).strftime('%Y%m%d')
-        
-        # Logika pembersihan: Jika tanggal GMT sekarang lebih besar dari tanggal pembersihan terakhir
         if now_gmt > self.last_cleanup_date_gmt:
-            
-            # --- Bersihkan Cache ---
             print(f"🚨 Daily OTP cache cleanup triggered. Last cleanup: {self.last_cleanup_date_gmt}, Current GMT day: {now_gmt}")
             self.cache = {} 
-            # Perbarui tanggal pembersihan terakhir
             self.last_cleanup_date_gmt = now_gmt
-            
-            # Simpan perubahan
             self._save()
         else:
-            # Jika belum saatnya bersih, hanya simpan status cache saat ini
             self._save()
         
     def key(self, d: Dict[str, Any]) -> str: 
-        """Menghasilkan kunci cache hanya dari nilai OTP."""
         return str(d.get('otp'))
     
     def is_dup(self, d: Dict[str, Any]) -> bool:
-        """Memeriksa apakah OTP sudah ada di cache dan melakukan cleanup jika sudah ganti hari."""
-        self._cleanup() # Panggil cleanup di setiap pemeriksaan duplikat
+        self._cleanup() 
         key = self.key(d)
         if not key or key == 'None': return False 
         return key in self.cache
         
     def add(self, d: Dict[str, Any]):
-        """Menambahkan OTP ke cache."""
         key = self.key(d)
         if not key or key == 'None': return
-        # Menyimpan timestamp agar format file json tetap konsisten (walaupun tidak digunakan untuk expire)
         self.cache[key] = {'timestamp':datetime.now().isoformat()} 
         self._save()
         
     def filter(self, lst: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Memfilter list pesan, hanya menyertakan yang bukan duplikat dan menambahkannya ke cache."""
         out = []
         for d in lst:
-            # Pengecekan hanya jika ada OTP dan nomor telepon valid
             if d.get('otp') and d.get('phone') != 'N/A':
                 if not self.is_dup(d):
                     out.append(d)
-                    self.add(d) # Tambahkan ke cache setelah lolos filter (SIMPAN KE otp_cache.json)
+                    self.add(d) 
         return out
 
 otp_filter = OTPFilter()
 
-# ================= Telegram Functionality =================
+# ================= Telegram Functionality (tetap sama) =================
 
 def send_tg(text, with_inline_keyboard=False, target_chat_id=None):
     chat_id_to_use = target_chat_id if target_chat_id is not None else CHAT
@@ -369,11 +313,13 @@ class SMSMonitor:
         self.url = url
         self.browser = None
         self.page = None
-        self.is_logged_in = False # Status login
+        self.is_logged_in = False 
+        self._temp_username = None # NEW: Simpan kredensial di memori
+        self._temp_password = None # NEW: Simpan kredensial di memori
 
     async def initialize(self, p_instance):
         
-        # 1. Koneksi ke Chrome Debug Port menggunakan Playwright
+        # 1. Koneksi ke Chrome Debug Port
         self.browser = await p_instance.chromium.connect_over_cdp("http://127.0.0.1:9222")
         
         # 2. Ambil context pertama 
@@ -385,44 +331,56 @@ class SMSMonitor:
         print("✅ Playwright page connected successfully.")
 
     async def login(self):
-        """Melakukan proses login ke X.MNITNetwork."""
+        """Melakukan proses login ke X.MNITNetwork menggunakan kredensial di memori."""
         if not self.page:
             raise Exception("Page not initialized for login.")
-        if not MNIT_USERNAME or not MNIT_PASSWORD:
-            raise Exception("Login credentials (MNIT_USERNAME/MNIT_PASSWORD) not found in .env.")
-            
+        
+        # --- PERUBAHAN: Ambil kredensial dari memori ---
+        USERNAME = self._temp_username
+        PASSWORD = self._temp_password
+        
+        if not USERNAME or not PASSWORD:
+            raise Exception("Login credentials not provided via /login command.")
+        # -----------------------------------------------
+
         print(f"Attempting to navigate to login page: {LOGIN_URL}")
         await self.page.goto(LOGIN_URL, wait_until='networkidle') 
         
-        # 1. Isi Username (asumsi field name 'email')
+        # 1. Isi Username
         print("Filling in username...")
-        await self.page.fill('input[name="email"]', MNIT_USERNAME)
+        await self.page.fill('input[name="email"]', USERNAME) 
         
-        # 2. Isi Password (asumsi field name 'password')
+        # 2. Isi Password
         print("Filling in password...")
-        await self.page.fill('input[name="password"]', MNIT_PASSWORD)
+        await self.page.fill('input[name="password"]', PASSWORD) 
         
         # 3. Klik Tombol Login
         print("Clicking login button...")
-        # Asumsi tombol login adalah submit, bisa diganti dengan selector yang lebih spesifik
         await self.page.click('button[type="submit"]') 
         
-        # 4. Tunggu navigasi ke dashboard (atau halaman setelah login)
+        # 4. Tunggu navigasi ke dashboard
         try:
-            # Tunggu hingga navigasi ke DASHBOARD_URL atau timeout
-            await self.page.wait_for_url(DASHBOARD_URL, timeout=20000) # Timeout 20 detik
+            await self.page.wait_for_url(DASHBOARD_URL, timeout=20000) 
             self.is_logged_in = True
+            
+            # --- PENTING: Bersihkan kredensial dari memori setelah sukses ---
+            self._temp_username = None 
+            self._temp_password = None
+            # ----------------------------------------------------------------
+            
             print("✅ Login successful, navigated to dashboard.")
             return True
         except Exception as e:
             self.is_logged_in = False
             error_msg = f"❌ Login failed or did not navigate to dashboard within 20s. Error: {e}"
             print(error_msg)
+            
             # Ambil screenshot jika login gagal
             screenshot_filename = f"login_fail_{int(time.time())}.png"
             await self.page.screenshot(path=screenshot_filename, full_page=True)
-            send_photo_tg(screenshot_filename, f"⚠️ Gagal Login ke X.MNITNetwork.", target_chat_id=ADMIN_ID)
+            send_photo_tg(screenshot_filename, f"⚠️ Gagal Login ke X.MNITNetwork. Screenshot diambil:", target_chat_id=ADMIN_ID)
             os.remove(screenshot_filename)
+            
             raise Exception(error_msg)
 
     async def login_and_notify(self, admin_chat_id):
@@ -435,7 +393,9 @@ class SMSMonitor:
                 send_tg(f"✅ Login berhasil! Sekarang Anda dapat memulai monitoring dengan perintah: /startnew", target_chat_id=admin_chat_id)
             
         except Exception as e:
-            send_tg(f"❌ Login GAGAL. Error: `{e.__class__.__name__}: {e}`", target_chat_id=admin_chat_id)
+            # Notifikasi gagal login sudah dikirim di fungsi self.login()
+            if not self.is_logged_in:
+                 send_tg(f"❌ Login GAGAL (Pastikan kredensial benar). Error: `{e.__class__.__name__}`.", target_chat_id=admin_chat_id)
             self.is_logged_in = False
 
     async def fetch_sms(self) -> List[Dict[str, Any]]:
@@ -443,7 +403,7 @@ class SMSMonitor:
             print("⚠️ ERROR: Page not initialized or not logged in during fetch_sms.")
             return []
             
-        # PENTING: Navigasi ke DASHBOARD_URL jika belum berada di sana
+        # Navigasi ke DASHBOARD_URL jika belum berada di sana
         if self.page.url != self.url:
             print(f"Navigating to dashboard URL: {self.url}")
             try:
@@ -468,13 +428,11 @@ class SMSMonitor:
                 phone_span = r.find("span", class_="phone-number")
                 phone = clean_phone_number(phone_span.get_text(strip=True) if phone_span else "N/A")
                 
-                # B. Raw Message (Original & Cleaned)
+                # B. Raw Message
                 copy_icon = otp_badge_span.find("i", class_="copy-icon")
                 raw_message_original = copy_icon.get('data-sms', 'N/A') if copy_icon and copy_icon.get('data-sms') else otp_badge_span.get_text(strip=True)
                 
-                # LOGIKA PENGAMBILAN PESAN PENUH MENTAH 
                 if ':' in raw_message_original and raw_message_original != 'N/A':
-                    # Ambil bagian setelah ':' (biasanya isi pesan)
                     raw_message_clean = raw_message_original.split(':', 1)[1].strip()
                 else:
                     raw_message_clean = raw_message_original
@@ -533,7 +491,6 @@ class SMSMonitor:
 
         screenshot_filename = f"screenshot_{int(time.time())}.png"
         try:
-            # Pastikan navigasi ke dashboard sebelum refresh/screenshot
             if self.page.url != self.url:
                 await self.page.goto(self.url, wait_until='networkidle')
                 
@@ -566,7 +523,7 @@ BOT_STATUS = {
     "total_otps_sent": 0,
     "last_check": "Never",
     "cache_size": 0,
-    "monitoring_active": False, # Diubah menjadi False di awal
+    "monitoring_active": False, 
     "last_cleanup_gmt_date": "N/A"
 }
 
@@ -614,18 +571,30 @@ def check_cmd(stats):
                 elif text == "/refresh":
                     send_tg("⏳ Executing page refresh and screenshot...", with_inline_keyboard=False, target_chat_id=chat_id)
                     if GLOBAL_ASYNC_LOOP:
-                        # Menjalankan fungsi asinkron (refresh_and_screenshot) di thread aman
                         asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(admin_chat_id=chat_id), GLOBAL_ASYNC_LOOP)
                     else:
                         send_tg("❌ Loop error: Global loop not set.", target_chat_id=chat_id)
                         
-                elif text == "/login":
-                    send_tg("⏳ Executing login to X.MNITNetwork...", with_inline_keyboard=False, target_chat_id=chat_id)
-                    if GLOBAL_ASYNC_LOOP:
-                        # Menjalankan fungsi login
-                        asyncio.run_coroutine_threadsafe(monitor.login_and_notify(admin_chat_id=chat_id), GLOBAL_ASYNC_LOOP)
+                elif text.startswith("/login"):
+                    parts = text.split()
+                    if len(parts) == 3:
+                        
+                        username_input = parts[1]
+                        password_input = parts[2]
+                        
+                        # Simpan kredensial sementara di memori
+                        monitor._temp_username = username_input
+                        monitor._temp_password = password_input
+                        
+                        send_tg("⏳ Kredensial diterima. Executing login to X.MNITNetwork...", with_inline_keyboard=False, target_chat_id=chat_id)
+                        
+                        if GLOBAL_ASYNC_LOOP:
+                            asyncio.run_coroutine_threadsafe(monitor.login_and_notify(admin_chat_id=chat_id), GLOBAL_ASYNC_LOOP)
+                        else:
+                            send_tg("❌ Loop error: Global loop not set.", target_chat_id=chat_id)
+                            
                     else:
-                        send_tg("❌ Loop error: Global loop not set.", target_chat_id=chat_id)
+                        send_tg("⚠️ Format perintah salah. Gunakan: <code>/login username/email password</code>", target_chat_id=chat_id)
                         
                 elif text == "/startnew":
                     if monitor.is_logged_in:
@@ -647,10 +616,8 @@ async def monitor_sms_loop():
     global total_sent
     global BOT_STATUS
     
-    # 1. Gunakan async_playwright context manager
     async with async_playwright() as p:
         try:
-            # 2. Panggil initialize dengan instance Playwright 'p'
             await monitor.initialize(p)
         except Exception as e:
             print(f"FATAL ERROR: Failed to initialize SMSMonitor (Playwright/Browser connection). {e}")
@@ -658,29 +625,33 @@ async def monitor_sms_loop():
             BOT_STATUS["status"] = "FATAL ERROR"
             return 
     
-        # Awal, monitoring non-aktif
         BOT_STATUS["monitoring_active"] = False 
         
-        # Kirim pesan awal dan minta login (sudah dikirim di __main__)
+        # Kirim pesan awal dan minta login
+        initial_msg = (
+            "✅ <b>BOT X.MNIT ACTIVE MONITORING IS RUNNING.</b>\n\n"
+            "⚠️ **PERHATIAN**: Monitoring saat ini **PAUSED** dan belum login.\n\n"
+            "Silakan gunakan perintah admin berikut:\n"
+            "1. **Login & Kirim Kredensial**: <code>/login username/email password</code>\n" 
+            "2. **Mulai Monitoring**: `/startnew` (setelah login berhasil)"
+        )
+        send_tg(initial_msg, with_inline_keyboard=False, target_chat_id=ADMIN_ID)
+
 
         while True:
             try:
-                # Cek: Harus login DULU dan monitoring harus aktif
                 if BOT_STATUS["monitoring_active"] and monitor.is_logged_in:
                     
                     msgs = await monitor.fetch_sms()
                     
-                    # FILTER: Memfilter duplikasi dan MENYIMPAN ke otp_cache.json
                     new = otp_filter.filter(msgs)
 
                     if new:
                         print(f"✅ Found {len(new)} new OTP(s). Sending to Telegram one by one with 2-second delay...")
                         
                         for i, otp_data in enumerate(new):
-                            # --- 1. SIMPAN KE FILE JSON LOKAL (../get/smc.json) ---
                             save_otp_to_json(otp_data)
                             
-                            # --- 2. KIRIM KE TELEGRAM ---
                             message_text = format_otp_message(otp_data)
                             print(f"   -> Sending OTP {i+1}/{len(new)}: {otp_data['otp']} for {otp_data['phone']}")
                             
@@ -705,30 +676,23 @@ async def monitor_sms_loop():
             stats = update_global_status()
             check_cmd(stats)
             
-            # Delay utama 5 detik
             await asyncio.sleep(5) 
-# ----------------------------------------------------------------------------------
 
-# ================= FLASK WEB SERVER UNTUK API DAN DASHBOARD =================
+# ================= FLASK WEB SERVER UNTUK API DAN DASHBOARD (tetap sama) =================
 
 app = Flask(__name__, template_folder='templates')
 
-# 1. ROUTE UTAMA (UNTUK DASHBOARD)
 @app.route('/', methods=['GET'])
 def index():
-    """Melayani file dashboard.html."""
     return render_template('dashboard.html')
 
-# 2. ROUTE API 
 @app.route('/api/status', methods=['GET'])
 def get_status_json():
-    """Mengembalikan data status bot dalam format JSON."""
     update_global_status() 
     return jsonify(BOT_STATUS)
 
 @app.route('/manual-check', methods=['GET'])
 def manual_check():
-    """Memanggil refresh_and_screenshot di loop asinkron (dipicu dari Dashboard)."""
     if ADMIN_ID is None: return jsonify({"message": "Error: Admin ID not configured for this action."}), 400
     if GLOBAL_ASYNC_LOOP is None:
         return jsonify({"message": "Error: Asyncio loop not initialized."}), 500
@@ -736,7 +700,6 @@ def manual_check():
         return jsonify({"message": "Error: Not logged in. Please /login first via Telegram or login manually."}), 400
         
     try:
-        # Menjalankan fungsi asinkron (refresh_and_screenshot) di thread aman
         asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(admin_chat_id=ADMIN_ID), GLOBAL_ASYNC_LOOP)
         return jsonify({"message": "Halaman X.MNIT Network Refresh & Screenshot sedang dikirim ke Admin Telegram."})
     except RuntimeError as e:
@@ -746,7 +709,6 @@ def manual_check():
 
 @app.route('/telegram-status', methods=['GET'])
 def send_telegram_status_route():
-    """Memanggil fungsi untuk mengirim status ke Telegram."""
     if ADMIN_ID is None: return jsonify({"message": "Error: Admin ID not configured."}), 400
     
     stats_msg = get_status_message(update_global_status())
@@ -756,16 +718,11 @@ def send_telegram_status_route():
 
 @app.route('/clear-cache', methods=['GET'])
 def clear_otp_cache_route():
-    """Membersihkan cache OTP secara manual."""
     global otp_filter
     
-    # Dapatkan tanggal GMT saat ini
     now_gmt_str = datetime.now(timezone.utc).strftime('%Y%m%d')
     
-    # Hapus semua OTP
     otp_filter.cache = {}
-    
-    # Perbarui tanggal pembersihan terakhir
     otp_filter.last_cleanup_date_gmt = now_gmt_str
     otp_filter._save()
     
@@ -774,7 +731,6 @@ def clear_otp_cache_route():
 
 @app.route('/test-message', methods=['GET'])
 def test_message_route():
-    """Mengirim pesan tes ke Telegram menggunakan format OTP."""
     test_data = {
         "otp": "123456",
         "phone": "+12345678999",
@@ -810,7 +766,6 @@ def run_flask():
     
     global GLOBAL_ASYNC_LOOP
     if GLOBAL_ASYNC_LOOP and not asyncio._get_running_loop():
-        # Menetapkan loop ke thread Flask, jika loop sudah dibuat di main thread
         asyncio.set_event_loop(GLOBAL_ASYNC_LOOP) 
         print(f"✅ Async loop successfully set for Flask thread: {current_thread().name}")
         
@@ -843,18 +798,7 @@ if __name__ == "__main__":
         flask_thread.daemon = True
         flask_thread.start()
         
-        # 2. Kirim Pesan Aktivasi Telegram
-        # Sertakan instruksi untuk Admin
-        initial_msg = (
-            "✅ <b>BOT X.MNIT ACTIVE MONITORING IS RUNNING.</b>\n\n"
-            "⚠️ **PERHATIAN**: Monitoring saat ini **PAUSED** dan belum login.\n\n"
-            "Silakan gunakan perintah admin berikut:\n"
-            "1. **Login**: `/login` (untuk masuk ke dashboard X.MNIT)\n"
-            "2. **Mulai Monitoring**: `/startnew` (setelah login berhasil)"
-        )
-        send_tg(initial_msg, with_inline_keyboard=False, target_chat_id=ADMIN_ID)
-        
-        # 3. Mulai loop asinkron monitoring
+        # 2. Mulai loop asinkron monitoring
         try:
             loop.run_until_complete(monitor_sms_loop())
         except KeyboardInterrupt:
