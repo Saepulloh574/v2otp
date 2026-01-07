@@ -130,23 +130,42 @@ def format_otp_message(otp_data: Dict[str, Any]) -> str:
 FULL MESSAGES:
 <blockquote>{full_message_escaped}</blockquote>"""
 
+# =================================================================
+# 🎯 FUNGSI UTAMA PERBAIKAN: EKSTRAKSI OTP DENGAN TANDA HUBUNG/SPASI
+# =================================================================
+
 def extract_otp_from_text(text):
-    """Fungsi ekstraksi OTP yang fleksibel, diperbarui untuk pola MNIT Network baru."""
+    """Fungsi ekstraksi OTP yang fleksibel, diperbarui untuk pola MNIT Network baru dan format 668-098."""
     if not text: return None
+    
+    # Pola diurutkan dari yang paling spesifik/akurat (terkait kata kunci)
     patterns = [ 
-        r'<#>\s*(\d+)\s*—',  # Pola baru untuk format: <#> [OTP] —
+        # 1. Pola MNIT Network Baru: Mencakup angka, spasi, atau tanda hubung
+        r'<#>\s*([\d\s-]+)\s*—',  
+        
+        # 2. Pola kata kunci dengan angka, spasi, atau tanda hubung
+        r'code[:\s]*([\d\s-]+)',  
+        r'verification[:\s]*([\d\s-]+)', 
+        r'otp[:\s]*([\d\s-]+)',   
+        r'pin[:\s]*([\d\s-]+)',   
+
+        # 3. Pola Khusus WhatsApp (3-3)
+        r'\b(\d{3}[- ]?\d{3})\b', 
+        
+        # 4. Pola angka murni (6, 5, 4 digit) - ini adalah fallback
         r'\b(\d{6})\b', 
         r'\b(\d{5})\b', 
         r'\b(\d{4})\b', 
-        r'code[:\s]*(\d+)', 
-        r'verification[:\s]*(\d+)', 
-        r'otp[:\s]*(\d+)', 
-        r'pin[:\s]*(\d+)' 
     ]
+    
     for p in patterns:
         m = re.search(p, text, re.I)
         if m:
-            matched_otp = m.group(1) if len(m.groups()) >= 1 else m.group(0)
+            # Mengambil string mentah yang cocok (bisa berupa "668-098")
+            matched_otp_raw = m.group(1) if len(m.groups()) >= 1 else m.group(0)
+            
+            # 💡 LANGKAH KRUSIAL: Hapus semua karakter non-digit dari hasil yang cocok
+            matched_otp = re.sub(r'[^\d]', '', matched_otp_raw)
             
             # Filter tanggal 4 digit (misal 2026)
             if len(matched_otp) == 4:
@@ -155,9 +174,13 @@ def extract_otp_from_text(text):
                 except ValueError:
                     continue 
 
-            return matched_otp
+            # Pastikan OTP yang sudah dibersihkan tidak kosong
+            if matched_otp:
+                return matched_otp
             
     return None
+
+# =================================================================
 
 def clean_service_name(service):
     """Fungsi untuk membersihkan dan menstandarisasi nama layanan."""
@@ -175,9 +198,6 @@ def clean_service_name(service):
         'tiktok': 'TikTok', 
         'mnitnetwork': 'M-NIT Network',
         'laz+nxcar': 'Facebook', # Pemetaan spesifik dari MNIT
-        # Hindari kata umum menjadi nama service
-        'ваш':'Unknown Service (RU)', 
-        'your':'Unknown Service (EN)',
     }
     
     s_lower = service.strip().lower()
@@ -187,7 +207,11 @@ def clean_service_name(service):
         if k in s_lower:
             return v
             
-    # Prioritas 2: Jika tidak ada kecocokan, kembalikan teks asli dengan Title case
+    # Prioritas 2: Jika kata kunci adalah kata umum, ubah menjadi "Unknown"
+    if s_lower in ['ваш', 'your', 'service', 'code', 'pin']:
+        return "Unknown Service"
+            
+    # Prioritas 3: Jika tidak ada kecocokan, kembalikan teks asli dengan Title case
     return service.strip().title()
 
 def get_status_message(stats):
@@ -275,17 +299,18 @@ class OTPFilter:
             self._save()
         
     def key(self, d: Dict[str, Any]) -> str: 
-        return str(d.get('otp'))
+        # Menggunakan OTP + Phone sebagai key yang lebih unik
+        return f"{d.get('otp')}_{d.get('phone')}"
     
     def is_dup(self, d: Dict[str, Any]) -> bool:
         self._cleanup() 
         key = self.key(d)
-        if not key or key == 'None': return False 
+        if not key or key.split('_')[0] == 'None': return False 
         return key in self.cache
         
     def add(self, d: Dict[str, Any]):
         key = self.key(d)
-        if not key or key == 'None': return
+        if not key or key.split('_')[0] == 'None': return
         self.cache[key] = {'timestamp':datetime.now().isoformat()} 
         self._save()
         
@@ -490,8 +515,7 @@ class SMSMonitor:
 
     async def fetch_sms(self) -> List[Dict[str, Any]]:
         """
-        Mengambil data SMS dari dashboard, diadaptasi untuk struktur HTML baru
-        dengan fokus pada status 'success' dan perbaikan ekstraksi Service/Raw Message.
+        Mengambil data SMS dari dashboard.
         """
         if not self.page or not self.is_logged_in: 
             print("⚠️ ERROR: Page not initialized or not logged in during fetch_sms.")
@@ -552,7 +576,7 @@ class SMSMonitor:
             if not message_div:
                 continue
             
-            # raw_message_full berisi: <#> 753735 — ваш код для Facebook Laz+nxCarLW
+            # raw_message_full berisi: <#> 753735 — ваш код untuk Facebook Laz+nxCarLW
             raw_message_full = message_div.get_text(strip=True, separator=' ')
             
             
@@ -572,10 +596,24 @@ class SMSMonitor:
                 service = clean_service_name(service_match.group(1))
             else:
                 # 2. Fallback: Ambil kata pertama setelah tanda '—' untuk diolah clean_service_name
+                # Menggunakan teks setelah '—' atau seluruh pesan jika '—' tidak ada
                 service_hint = raw_message_full.split('—', 1)[1].strip() if '—' in raw_message_full else raw_message_full
                 
-                # Pisahkan kata pertama dari hint service (Contoh: "ваш" atau "your")
-                service_raw = service_hint.split(' ', 1)[0]
+                # Coba pisahkan berdasarkan spasi atau kata kunci "code" / "pin"
+                if len(service_hint.split()) > 1:
+                    # Ambil kata yang paling mungkin adalah service name
+                    words = service_hint.split()
+                    
+                    # Cari kata yang terdekat setelah "code" atau "pin"
+                    try:
+                        idx_code = words.index([w for w in words if 'code' in w.lower() or 'pin' in w.lower()][0])
+                        service_raw = words[idx_code + 1] # Ambil kata setelah code/pin
+                    except:
+                        # Fallback: Ambil kata pertama (seringkali bahasa asing seperti "ваш" atau "your")
+                        service_raw = words[0]
+                else:
+                    service_raw = service_hint
+                    
                 service = clean_service_name(service_raw)
             
             # --- Simpan Hasil ---
@@ -764,6 +802,16 @@ def check_cmd(stats):
                 elif text == "/stop":
                     BOT_STATUS["monitoring_active"] = False
                     send_tg("⏸️ Monitoring paused. Use <code>/startnew</code> to resume.", target_chat_id=chat_id)
+                
+                elif text == "/clear-cache":
+                    # Menjalankan fungsi clear cache
+                    now_gmt_str = datetime.now(timezone.utc).strftime('%Y%m%d')
+                    otp_filter.cache = {}
+                    otp_filter.last_cleanup_date_gmt = now_gmt_str
+                    otp_filter._save()
+                    update_global_status() 
+                    send_tg(f"🗑️ <b>OTP Cache Cleared</b>. Cache size: <code>{BOT_STATUS['cache_size']} items</code>", target_chat_id=chat_id)
+
 
     except requests.exceptions.RequestException as e:
         print(f"❌ Error during getUpdates: {e}")
@@ -847,7 +895,7 @@ app = Flask(__name__, template_folder='templates')
 
 @app.route('/', methods=['GET'])
 def index():
-    # Pastikan Anda memiliki file templates/dashboard.html
+    # Pastikan Anda memiliki file templates/dashboard.html di direktori yang sama
     return render_template('dashboard.html') 
 
 @app.route('/api/status', methods=['GET'])
@@ -932,6 +980,7 @@ def run_flask():
     
     global GLOBAL_ASYNC_LOOP
     if GLOBAL_ASYNC_LOOP and not asyncio._get_running_loop():
+        # Memastikan event loop terpasang ke thread ini
         asyncio.set_event_loop(GLOBAL_ASYNC_LOOP) 
         
     print(f"✅ Flask API & Dashboard running on http://127.0.0.1:{port}")
@@ -952,8 +1001,10 @@ if __name__ == "__main__":
         print("=======================================================\n")
 
         try:
+            # Coba ambil loop yang sudah ada
             loop = asyncio.get_event_loop()
         except RuntimeError:
+            # Jika tidak ada, buat loop baru
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
         
