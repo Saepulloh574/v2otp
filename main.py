@@ -153,9 +153,9 @@ def extract_otp_from_text(text):
         r'\b(\d{3}[- ]?\d{3})\b', 
         
         # 4. Pola angka murni (6, 5, 4 digit) - ini adalah fallback
+        r'\b(\d{8})\b', 
         r'\b(\d{6})\b', 
         r'\b(\d{5})\b', 
-        r'\b(\d{4})\b', 
     ]
     
     for p in patterns:
