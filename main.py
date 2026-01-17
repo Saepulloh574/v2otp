@@ -16,1009 +16,173 @@ from typing import Dict, Any, List
 from flask import Flask, jsonify, render_template
 # --------------------
 
-# Muat variabel lingkungan dari file .env
 load_dotenv()
 
-# ================= Konstanta Telegram untuk Tombol =================
+# ================= Konstanta & Config =================
 TELEGRAM_BOT_LINK = "https://t.me/myzuraisgoodbot"
 TELEGRAM_ADMIN_LINK = "https://t.me/Imr1d"
-
-# ================= Telegram Configuration (Loaded from .env) =================
 BOT = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT = os.getenv("TELEGRAM_CHAT_ID")
 try:
     ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID"))
-except (ValueError, TypeError):
-    print("⚠️ WARNING: TELEGRAM_ADMIN_ID tidak valid. Perintah admin dinonaktifkan.")
+except:
     ADMIN_ID = None
 
-# --- X.MNIT Network Configuration ---
 LOGIN_URL = "https://x.mnitnetwork.com/mauth/login" 
 DASHBOARD_URL = "https://x.mnitnetwork.com/mdashboard/getnum" 
-# ------------------------------------
-
-LAST_ID = 0
-
-# ================= Konfigurasi File Path =================
-OTP_SAVE_FOLDER = os.path.join("..", "get")
-OTP_SAVE_FILE = os.path.join(OTP_SAVE_FOLDER, "smc.json")
-# ---------------------------------------------------------
-
-# ================= Global State for Asyncio Loop & Command =================
+OTP_SAVE_FILE = os.path.join("..", "get", "smc.json")
 GLOBAL_ASYNC_LOOP = None 
 AWAITING_CREDENTIALS = False 
 
 # ================= Utils =================
 
 COUNTRY_EMOJI = {
-    "NEPAL": "🇳🇵",
-    "IVORY COAST": "🇨🇮",
-    "GUINEA": "🇬🇳",
-    "CENTRAL AFRIKA": "🇨🇫",
-    "TOGO": "🇹🇬",
-    "TAJIKISTAN": "🇹🇯",
-    "BENIN": "🇧🇯",
-    "SIERRA LEONE": "🇸🇱",
-    "MADAGASCAR": "🇲🇬",
-    "AFGANISTAN": "🇦🇫",
-    "ZURA STORE": "🇮🇩"
+    "NEPAL": "🇳🇵", "IVORY COAST": "🇨🇮", "GUINEA": "🇬🇳", "CENTRAL AFRIKA": "🇨🇫",
+    "TOGO": "🇹🇬", "TAJIKISTAN": "🇹🇯", "BENIN": "🇧🇯", "SIERRA LEONE": "🇸🇱",
+    "MADAGASCAR": "🇲🇬", "AFGANISTAN": "🇦🇫", "ZURA STORE": "🇮🇩", "GEORGIA": "🇬🇪", "MYANMAR": "🇲🇲"
 }
-
-def get_country_emoji(country_name: str) -> str:
-    return COUNTRY_EMOJI.get(country_name.strip().upper(), "")
-
-def create_inline_keyboard():
-    keyboard = {
-        "inline_keyboard": [
-            [
-                {"text": "➡️ GetNumber", "url": TELEGRAM_BOT_LINK},
-                {"text": "👤 Admin", "url": TELEGRAM_ADMIN_LINK}
-            ]
-        ]
-    }
-    return json.dumps(keyboard)
 
 def clean_phone_number(phone):
     if not phone: return "N/A"
     cleaned = re.sub(r'[^\d+]', '', phone)
-    if cleaned and not cleaned.startswith('+') and cleaned != 'N/A':
-        cleaned = '+' + cleaned
-    return cleaned or phone
+    if cleaned and not cleaned.startswith('+') and cleaned != 'N/A': cleaned = '+' + cleaned
+    return cleaned
 
-def mask_phone_number(phone, visible_start=4, visible_end=4):
-    if not phone or phone == "N/A": return phone
-    prefix = ""
-    if phone.startswith('+'):
-        prefix = '+'
-        digits = phone[1:]
-    else:
-        digits = phone
-        
-    if len(digits) <= visible_start + visible_end:
-        return phone
-        
-    digits = re.sub(r'[^\d]', '', digits)
+def clean_service_name(text):
+    if not text: return "Unknown"
+    text = text.lower()
+    maps = {'facebook': 'Facebook', 'whatsapp': 'WhatsApp', 'instagram': 'Instagram', 'google': 'Google', 'tiktok': 'TikTok'}
+    for k, v in maps.items():
+        if k in text: return v
+    return "Service"
 
-    start_part = digits[:visible_start]
-    end_part = digits[-visible_end:]
-    mask_length = len(digits) - visible_start - visible_end
-    masked_part = '*' * mask_length
-    return prefix + start_part + masked_part + end_part
-
-def format_otp_message(otp_data: Dict[str, Any]) -> str:
-    """Memformat data OTP menjadi pesan Telegram dengan emoji."""
-    otp = otp_data.get('otp', 'N/A')
-    phone = otp_data.get('phone', 'N/A')
-    masked_phone = mask_phone_number(phone, visible_start=4, visible_end=4)
-    service = otp_data.get('service', 'Unknown')
-    range_text = otp_data.get('range', 'N/A')
-    full_message = otp_data.get('raw_message', 'N/A')
-    
-    emoji = get_country_emoji(range_text)
-    # Gunakan full_message asli yang sudah utuh, dan lakukan escaping
-    full_message_escaped = full_message.replace('<', '&lt;').replace('>', '&gt;') 
-    
-    # Menggunakan tag <b> dan <code> sesuai permintaan
+def format_otp_message(otp_data):
+    emoji = COUNTRY_EMOJI.get(otp_data['range'].upper(), "")
     return f"""🔐 <b>New OTP Received</b>
 
-🌍 Country: <b>{range_text} {emoji}</b>
-
-📱 Number: <code>{masked_phone}</code>
-🌐 Service: <b>{service}</b>
-🔢 OTP: <code>{otp}</code>
+🌍 Country: <b>{otp_data['range']} {emoji}</b>
+📱 Number: <code>{otp_data['phone']}</code>
+🌐 Service: <b>{otp_data['service']}</b>
+🔢 OTP: <code>{otp_data['otp']}</code>
 
 FULL MESSAGES:
-<blockquote>{full_message_escaped}</blockquote>"""
+<blockquote>{otp_data['raw_message']}</blockquote>"""
 
-# =================================================================
-# 🎯 FUNGSI UTAMA PERBAIKAN: EKSTRAKSI OTP DENGAN TANDA HUBUNG/SPASI
-# =================================================================
-
-def extract_otp_from_text(text):
-    """Fungsi ekstraksi OTP yang fleksibel, diperbarui untuk pola MNIT Network baru dan format 668-098."""
-    if not text: return None
-    
-    # Pola diurutkan dari yang paling spesifik/akurat (terkait kata kunci)
-    patterns = [ 
-        # 1. Pola MNIT Network Baru: Mencakup angka, spasi, atau tanda hubung
-        r'<#>\s*([\d\s-]+)\s*—',  
-        
-        # 2. Pola kata kunci dengan angka, spasi, atau tanda hubung
-        r'code[:\s]*([\d\s-]+)',  
-        r'verification[:\s]*([\d\s-]+)', 
-        r'otp[:\s]*([\d\s-]+)',   
-        r'pin[:\s]*([\d\s-]+)',   
-
-        # 3. Pola Khusus WhatsApp (3-3)
-        r'\b(\d{3}[- ]?\d{3})\b', 
-        
-        # 4. Pola angka murni (6, 5, 4 digit) - ini adalah fallback
-        r'\b(\d{8})\b', 
-        r'\b(\d{6})\b', 
-        r'\b(\d{5})\b', 
-    ]
-    
-    for p in patterns:
-        m = re.search(p, text, re.I)
-        if m:
-            # Mengambil string mentah yang cocok (bisa berupa "668-098")
-            matched_otp_raw = m.group(1) if len(m.groups()) >= 1 else m.group(0)
-            
-            # 💡 LANGKAH KRUSIAL: Hapus semua karakter non-digit dari hasil yang cocok
-            matched_otp = re.sub(r'[^\d]', '', matched_otp_raw)
-            
-            # Filter tanggal 4 digit (misal 2026)
-            if len(matched_otp) == 4:
-                try:
-                    if 2000 <= int(matched_otp) <= 2099: continue 
-                except ValueError:
-                    continue 
-
-            # Pastikan OTP yang sudah dibersihkan tidak kosong
-            if matched_otp:
-                return matched_otp
-            
-    return None
-
-# =================================================================
-
-def clean_service_name(service):
-    """Fungsi untuk membersihkan dan menstandarisasi nama layanan."""
-    if not service: return "Unknown"
-    
-    # Daftar pemetaan kata kunci service
-    maps = {
-        'facebook': 'Facebook',
-        'whatsapp': 'WhatsApp',
-        'instagram': 'Instagram',
-        'telegram': 'Telegram',
-        'google': 'Google',
-        'twitter': 'Twitter',
-        'linkedin': 'LinkedIn',
-        'tiktok': 'TikTok', 
-        'mnitnetwork': 'M-NIT Network',
-        'laz+nxcar': 'Facebook', # Pemetaan spesifik dari MNIT
-    }
-    
-    s_lower = service.strip().lower()
-
-    # Prioritas 1: Mencari kecocokan tepat dari kata kunci di pesan yang masuk
-    for k, v in maps.items():
-        if k in s_lower:
-            return v
-            
-    # Prioritas 2: Jika kata kunci adalah kata umum, ubah menjadi "Unknown"
-    if s_lower in ['ваш', 'your', 'service', 'code', 'pin']:
-        return "Unknown Service"
-            
-    # Prioritas 3: Jika tidak ada kecocokan, kembalikan teks asli dengan Title case
-    return service.strip().title()
-
-def get_status_message(stats):
-    # Menggunakan tag <b> dan <code>
-    return f"""🤖 <b>Bot Status</b>
-
-⚡ Status: <b>{stats['status']}</b>
-🌐 Login Status: <b>{'✅ Logged In' if monitor.is_logged_in else '❌ Awaiting Login'}</b>
-⏱️ Uptime: <code>{stats['uptime']}</code>
-📨 Total OTPs Sent: <b>{stats['total_otps_sent']}</b>
-🔍 Last Check: <code>{stats['last_check']}</code>
-💾 Cache Size: <code>{stats['cache_size']} items</code>
-📅 Last Cache Reset (GMT): <code>{stats['last_cleanup_gmt_date']}</code>
-
-<i>Bot is running</i>"""
-
-def save_otp_to_json(otp_data: Dict[str, Any]):
-    """Menyimpan data OTP ke file JSON di ../get/smc.json."""
-    if not os.path.exists(OTP_SAVE_FOLDER):
-        os.makedirs(OTP_SAVE_FOLDER)
-        
-    data_to_save = {
-        "Number": otp_data.get('phone', 'N/A'),
-        "OTP": otp_data.get('otp', 'N/A'),
-        "FullMessage": otp_data.get('raw_message', 'N/A')
-    }
-    
-    try:
-        existing_data = []
-        if os.path.exists(OTP_SAVE_FILE) and os.stat(OTP_SAVE_FILE).st_size > 0:
-            with open(OTP_SAVE_FILE, 'r') as f:
-                try:
-                    existing_data = json.load(f)
-                    if not isinstance(existing_data, list): existing_data = []
-                except json.JSONDecodeError: existing_data = []
-        
-        existing_data.append(data_to_save)
-        
-        with open(OTP_SAVE_FILE, 'w') as f:
-            json.dump(existing_data, f, indent=2)
-            
-    except Exception as e:
-        print(f"❌ ERROR: Failed to save OTP to JSON file {OTP_SAVE_FILE}: {e}")
-
-# ================= OTP Filter Class =================
-
-class OTPFilter:
-    
-    CLEANUP_KEY = '__LAST_CLEANUP_GMT__' 
-
-    def __init__(self, file='otp_cache.json'): 
-        self.file = file
-        self.cache = self._load()
-        self.last_cleanup_date_gmt = self.cache.pop(self.CLEANUP_KEY, '19700101') 
-        self._cleanup() 
-        print(f"✅ OTP Cache loaded from '{self.file}'. Size after cleanup: {len(self.cache)} items. Last cleanup GMT: {self.last_cleanup_date_gmt}")
-        
-    def _load(self) -> Dict[str, Dict[str, Any]]:
-        if os.path.exists(self.file):
-            try:
-                if os.stat(self.file).st_size > 0:
-                    with open(self.file, 'r') as f: return json.load(f)
-                else: return {}
-            except json.JSONDecodeError as e:
-                print(f"⚠️ WARNING: Cache file '{self.file}' corrupted. Resetting cache. Error: {e}")
-                return {}
-            except Exception as e:
-                print(f"Error loading cache: {e}")
-                return {}
-        return {}
-        
-    def _save(self): 
-        temp_cache = self.cache.copy()
-        temp_cache[self.CLEANUP_KEY] = self.last_cleanup_date_gmt
-        json.dump(temp_cache, open(self.file,'w'), indent=2)
-    
-    def _cleanup(self):
-        now_gmt = datetime.now(timezone.utc).strftime('%Y%m%d')
-        if now_gmt > self.last_cleanup_date_gmt:
-            print(f"🚨 Daily OTP cache cleanup triggered. Last cleanup: {self.last_cleanup_date_gmt}, Current GMT day: {now_gmt}")
-            self.cache = {} 
-            self.last_cleanup_date_gmt = now_gmt
-            self._save()
-        else:
-            self._save()
-        
-    def key(self, d: Dict[str, Any]) -> str: 
-        # Menggunakan OTP + Phone sebagai key yang lebih unik
-        return f"{d.get('otp')}_{d.get('phone')}"
-    
-    def is_dup(self, d: Dict[str, Any]) -> bool:
-        self._cleanup() 
-        key = self.key(d)
-        if not key or key.split('_')[0] == 'None': return False 
-        return key in self.cache
-        
-    def add(self, d: Dict[str, Any]):
-        key = self.key(d)
-        if not key or key.split('_')[0] == 'None': return
-        self.cache[key] = {'timestamp':datetime.now().isoformat()} 
-        self._save()
-        
-    def filter(self, lst: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        out = []
-        for d in lst:
-            if d.get('otp') and d.get('phone') != 'N/A':
-                if not self.is_dup(d):
-                    out.append(d)
-                    self.add(d) 
-        return out
-
-otp_filter = OTPFilter()
-
-# ================= Telegram Functionality =================
-
-def send_tg(text, with_inline_keyboard=False, target_chat_id=None):
-    chat_id_to_use = target_chat_id if target_chat_id is not None else CHAT
-    if not BOT or not chat_id_to_use:
-        print("❌ Telegram config missing (BOT or CHAT ID). Cannot send message.")
-        return
-    payload = {'chat_id': chat_id_to_use, 'text': text, 'parse_mode': 'HTML'}
-    if with_inline_keyboard:
-        payload['reply_markup'] = create_inline_keyboard()
-    try:
-        response = requests.post(
-            f"https://api.telegram.org/bot{BOT}/sendMessage",
-            data=payload,
-            timeout=15  
-        )
-        if not response.ok:
-            print(f"⚠️ Telegram API Error ({response.status_code}): {response.text}")
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Telegram Connection Error: {e}")
-    except Exception as e:
-        print(f"❌ Unknown Error in send_tg: {e}")
-
-def send_photo_tg(photo_path, caption="", target_chat_id=None):
-    chat_id_to_use = target_chat_id if target_chat_id is not None else CHAT
-    if not BOT or not chat_id_to_use:
-        print("❌ Telegram config missing (BOT or CHAT ID). Cannot send photo.")
-        return False
-    url = f"https://api.telegram.org/bot{BOT}/sendPhoto"
-    try:
-        with open(photo_path, 'rb') as photo_file:
-            files = {'photo': photo_file}
-            data = {'chat_id': chat_id_to_use, 'caption': caption, 'parse_mode': 'HTML'}
-            response = requests.post(url, files=files, data=data, timeout=20)
-        if not response.ok:
-            print(f"⚠️ Telegram Photo API Error ({response.status_code}): {response.text}")
-            return False
-        return True
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Telegram Connection Error while sending photo: {e}")
-        return False
-    except Exception as e:
-        print(f"❌ Unknown Error in send_photo_tg: {e}")
-        return False
-
-# ================= Scraper & Monitor Class =================
+# ================= Monitor Class =================
 
 class SMSMonitor:
-    
-    def __init__(self, url=DASHBOARD_URL): 
-        self.url = url
+    def __init__(self):
+        self.url = DASHBOARD_URL
         self.browser = None
         self.page = None
-        self.is_logged_in = False 
-        self._temp_username = None 
-        self._temp_password = None 
+        self.is_logged_in = False
 
     async def initialize(self, p_instance):
-        
-        # 1. Koneksi ke Chrome Debug Port
-        # Menggunakan 'http://127.0.0.1:9222' sesuai konfigurasi standar
+        # Konek ke Chrome yang sudah terbuka
         self.browser = await p_instance.chromium.connect_over_cdp("http://127.0.0.1:9222")
-        
-        # 2. Ambil context pertama 
-        context = self.browser.contexts[0]
-        
-        # 3. Buat page baru
-        self.page = await context.new_page()
-        
-        print("✅ Playwright page connected successfully.")
-
-    async def check_url_login_status(self) -> bool:
-        """
-        Memeriksa dan mengatur status login (self.is_logged_in) 
-        berdasarkan URL saat ini di halaman Playwright.
-        """
-        if not self.page:
-            self.is_logged_in = False
-            return False
-            
-        try:
-            current_url = self.page.url
-        except Exception:
-            # Jika TargetClosedError atau browser error, anggap tidak login
-            self.is_logged_in = False 
-            return False
-        
-        # Logged in jika URL mengarah ke Dashboard
-        if current_url.startswith("https://x.mnitnetwork.com/mdashboard"):
-            self.is_logged_in = True
-        # Sebaliknya, anggap belum login
-        else:
-            self.is_logged_in = False
-
-        return self.is_logged_in
-
-    async def login(self):
-        """Melakukan proses login ke X.MNITNetwork menggunakan kredensial di memori."""
-        if not self.page:
-            raise Exception("Page not initialized for login.")
-        
-        USERNAME = self._temp_username
-        PASSWORD = self._temp_password
-        
-        if not USERNAME or not PASSWORD:
-            raise Exception("Login credentials not found in memory. Please use /login command first.")
-        
-        # --- Navigasi eksplisit dan tunggu selector ---
-        print(f"Attempting to navigate to login page: {LOGIN_URL}")
-        
-        await self.page.goto("about:blank") 
-        await self.page.goto(LOGIN_URL, wait_until='load', timeout=15000) 
-        
-        EMAIL_SELECTOR = 'input[type="email"]'
-        PASSWORD_SELECTOR = 'input[type="password"]'
-        SUBMIT_SELECTOR = 'button[type="submit"]'
-        
-        # Pastikan kolom login muncul sebelum diisi
-        await self.page.wait_for_selector(EMAIL_SELECTOR, timeout=10000) 
-        
-        # 1. Isi Username dengan simulasi Human Typing (delay=100ms)
-        print("Filling in username with human-like delay...")
-        await self.page.click(EMAIL_SELECTOR)
-        await self.page.type(EMAIL_SELECTOR, USERNAME, delay=100) 
-        
-        # 2. Isi Password dengan simulasi Human Typing (delay=100ms)
-        print("Filling in password with human-like delay...")
-        await self.page.click(PASSWORD_SELECTOR)
-        await self.page.type(PASSWORD_SELECTOR, PASSWORD, delay=100)
-        
-        # 3. Klik Tombol Login
-        print("Clicking login button...")
-        await asyncio.sleep(1) 
-        
-        # 4. TUNGGU VALIDASI LOGIN
-        try:
-            # Lakukan klik
-            await self.page.click(SUBMIT_SELECTOR) 
-
-            # TUNGGU URL DASHBOARD secara eksplisit (30 detik)
-            print(f"Waiting for dashboard URL: {DASHBOARD_URL}...")
-            # Gunakan regex untuk mencakup /mdashboard atau /mdashboard/getnum
-            await self.page.wait_for_url(re.compile(r"https:\/\/x\.mnitnetwork\.com\/mdashboard.*"), timeout=30000) 
-            
-            # Optional: Tunggu elemen khas dashboard (tbody)
-            await self.page.wait_for_selector('tbody', timeout=10000)
-            
-            self.is_logged_in = True
-            self._temp_username = None 
-            self._temp_password = None
-            
-            print("✅ Login successful, navigated to dashboard.")
-            return True
-        
-        # --- Catch Playwright and other errors ---
-        except Exception as e:
-            self.is_logged_in = False
-            current_url_on_fail = self.page.url if self.page else "N/A"
-            
-            error_detail = str(e).split('\n')[0]
-            error_msg = f"❌ Login Gagal. Error: {e.__class__.__name__}. URL saat Gagal: {current_url_on_fail}. Detail: {error_detail}"
-            print(error_msg)
-            
-            screenshot_filename = f"login_fail_{int(time.time())}.png"
-            try:
-                # Ambil screenshot
-                await self.page.screenshot(path=screenshot_filename, full_page=True)
-                send_photo_tg(screenshot_filename, f"⚠️ Gagal Login ke <b>X.MNITNetwork</b>. URL saat gagal: <code>{current_url_on_fail}</code>", target_chat_id=ADMIN_ID)
-                os.remove(screenshot_filename)
-            except Exception as se:
-                print(f"❌ Gagal mengambil screenshot: {se.__class__.__name__}")
-                send_tg(f"⚠️ Gagal Login ke <b>X.MNITNetwork</b>. Error: <code>{e.__class__.__name__}</code>. Gagal mengambil screenshot.", target_chat_id=ADMIN_ID)
-            
-            raise Exception(f"Validasi URL Login GAGAL: {current_url_on_fail}")
-
-    async def login_and_notify(self, admin_chat_id):
-        """Wrapper untuk login dan mengirim notifikasi ke admin."""
-        try:
-            success = await self.login()
-            if success:
-                await self.refresh_and_screenshot(admin_chat_id)
-                send_tg(f"✅ Login berhasil! Sekarang Anda dapat memulai monitoring dengan perintah: <code>/startnew</code>", target_chat_id=admin_chat_id)
-            
-        except Exception as e:
-            error_summary = str(e).split('\n')[0] 
-            send_tg(f"❌ Login GAGAL. Error: <code>{error_summary}</code>. Cek screenshot yang baru saja terkirim untuk detail halaman.", target_chat_id=admin_chat_id)
-            self.is_logged_in = False
+        self.page = self.browser.contexts[0].pages[0] if self.browser.contexts[0].pages else await self.browser.contexts[0].new_page()
+        # Berikan izin clipboard agar script bisa membaca isi clipboard setelah klik
+        await self.browser.contexts[0].grant_permissions(['clipboard-read', 'clipboard-write'])
 
     async def fetch_sms(self) -> List[Dict[str, Any]]:
-        """
-        Mengambil data SMS dari dashboard.
-        """
-        if not self.page or not self.is_logged_in: 
-            print("⚠️ ERROR: Page not initialized or not logged in during fetch_sms.")
-            return []
-            
-        if self.page.url != self.url:
-            print(f"Navigating to dashboard URL: {self.url}")
-            try:
-                await self.page.goto(self.url, wait_until='domcontentloaded', timeout=15000)
-            except Exception as e:
-                print(f"❌ Error navigating to dashboard: {e}")
-                return []
-                
-        try:
-            await self.page.wait_for_selector('tbody.text-sm.divide-y.divide-white\\/5', timeout=10000)
-        except Exception as e:
-            print(f"❌ Error: Gagal menemukan tabel data SMS (tbody): {e}")
-            return []
+        if not self.page: return []
+        
+        # Pastikan di dashboard
+        if "mdashboard" not in self.page.url:
+            await self.page.goto(self.url)
+            await self.page.wait_for_load_state("networkidle")
 
+        results = []
+        # Ambil semua baris sukses
+        rows = await self.page.query_selector_all("tr.group")
+        
+        for row in rows:
+            status_el = await row.query_selector("span.border-green-500")
+            if not status_el: continue # Lewati jika bukan success
 
-        html = await self.page.content()
-        soup = BeautifulSoup(html, "html.parser")
-        messages = []
+            # 1. Ambil Nomor & OTP yang terlihat
+            phone_el = await row.query_selector("span.font-mono.text-lg")
+            phone = await phone_el.inner_text() if phone_el else "N/A"
+            
+            otp_el = await row.query_selector("span.tracking-widest")
+            otp = await otp_el.inner_text() if otp_el else "N/A"
 
-        tbody = soup.find("tbody", class_="text-sm divide-y divide-white/5")
-        if not tbody:
-            print("❌ Error: Tbody data tidak ditemukan.")
-            return []
-            
-        rows = tbody.find_all("tr")
+            country_el = await row.query_selector("span.text-slate-200")
+            country = await country_el.inner_text() if country_el else "Unknown"
 
-        # Daftar kata kunci layanan yang dicari, dikumpulkan menjadi satu pola regex
-        SERVICE_KEYWORDS = r'(facebook|whatsapp|instagram|telegram|google|twitter|linkedin|tiktok)'
+            # 2. LOGIKA KLIK CLIPBOARD: 
+            # Karena pesan tidak ada di DOM, kita klik tombolnya lalu baca clipboard
+            copy_btn = await row.query_selector("button[title*='Copy']")
+            full_msg = "Pesan gagal diambil"
+            
+            if copy_btn:
+                try:
+                    await copy_btn.click()
+                    await asyncio.sleep(0.5) # Tunggu proses copy JS selesai
+                    # Ambil teks dari clipboard menggunakan evaluasi browser
+                    full_msg = await self.page.evaluate("navigator.clipboard.readText()")
+                except Exception as e:
+                    full_msg = f"OTP: {otp} (Gagal akses clipboard)"
 
-        for r in rows:
-            tds = r.find_all("td")
-            if len(tds) < 3:
-                continue
+            results.append({
+                "otp": otp,
+                "phone": clean_phone_number(phone),
+                "service": clean_service_name(full_msg),
+                "range": country,
+                "raw_message": full_msg
+            })
             
-            col1 = tds[0]
-            
-            status_span = col1.find("span", class_=lambda x: x and "text-[10px] uppercase" in x and "rounded-md" in x)
-            status = status_span.get_text(strip=True) if status_span else "N/A"
-            
-            # Hanya proses yang statusnya 'success'
-            if status.lower() != 'success':
-                 continue
-            
-            # A. Phone Number
-            phone_span = col1.find("span", class_=lambda x: x and "font-mono text-white font-bold text-lg" in x)
-            phone_number_raw = phone_span.get_text(strip=True) if phone_span else "N/A"
-            phone = clean_phone_number(phone_number_raw)
-            
-            # B. Raw Message (FULL)
-            # Div yang berisi pesan lengkap
-            message_div = col1.find("div", class_=lambda x: x and "bg-slate-800 border" in x and "rounded-l-md" in x)
-            
-            if not message_div:
-                continue
-            
-            # raw_message_full berisi: <#> 753735 — ваш код untuk Facebook Laz+nxCarLW
-            raw_message_full = message_div.get_text(strip=True, separator=' ')
-            
-            
-            # C. OTP (Ekstraksi dari teks mentah full, menggunakan fungsi yang diperbarui)
-            otp = extract_otp_from_text(raw_message_full)
-                    
-            # D. Range/Country (Kolom kedua)
-            range_span = tds[1].find("span", class_="text-slate-200 font-medium")
-            range_text = range_span.get_text(strip=True) if range_span else "N/A"
-            
-            # E. Service (Logika ekstraksi yang ditingkatkan)
-            # 1. Cari nama service (Facebook, Google, dll.) di seluruh pesan (case-insensitive)
-            service_match = re.search(SERVICE_KEYWORDS, raw_message_full, re.IGNORECASE)
-            
-            if service_match:
-                # Jika ketemu, gunakan kata kunci yang cocok untuk dibersihkan
-                service = clean_service_name(service_match.group(1))
-            else:
-                # 2. Fallback: Ambil kata pertama setelah tanda '—' untuk diolah clean_service_name
-                # Menggunakan teks setelah '—' atau seluruh pesan jika '—' tidak ada
-                service_hint = raw_message_full.split('—', 1)[1].strip() if '—' in raw_message_full else raw_message_full
-                
-                # Coba pisahkan berdasarkan spasi atau kata kunci "code" / "pin"
-                if len(service_hint.split()) > 1:
-                    # Ambil kata yang paling mungkin adalah service name
-                    words = service_hint.split()
-                    
-                    # Cari kata yang terdekat setelah "code" atau "pin"
-                    try:
-                        idx_code = words.index([w for w in words if 'code' in w.lower() or 'pin' in w.lower()][0])
-                        service_raw = words[idx_code + 1] # Ambil kata setelah code/pin
-                    except:
-                        # Fallback: Ambil kata pertama (seringkali bahasa asing seperti "ваш" atau "your")
-                        service_raw = words[0]
-                else:
-                    service_raw = service_hint
-                    
-                service = clean_service_name(service_raw)
-            
-            # --- Simpan Hasil ---
-            if otp and phone != 'N/A':
-                messages.append({
-                    "otp": otp,
-                    "phone": phone,
-                    "service": service,
-                    "range": range_text,
-                    "timestamp": datetime.now().strftime("%H:%M:%S"),
-                    "raw_message": raw_message_full # Menggunakan pesan FULL
-                })
-        return messages
-    
-    async def soft_refresh(self): 
-        """Memuat ulang halaman."""
-        if not self.page or not self.is_logged_in: 
-            print("❌ Error: Page not initialized or not logged in for soft refresh.")
-            return
+        return results
 
-        try:
-            print("🔄 Performing soft page refresh...")
-            await self.page.reload(wait_until='networkidle') 
-            print("✅ Soft refresh complete.")
-        except Exception as e:
-            print(f"❌ Error during soft refresh: {e}")
+# ================= OTP Filter & Logic =================
 
-    async def refresh_and_screenshot(self, admin_chat_id): 
-        if not self.page or not self.is_logged_in:
-            print("❌ Error: Page not initialized/not logged in for refresh/screenshot.")
-            send_tg(f"⚠️ <b>Error Refresh/Screenshot</b>: Gagal inisialisasi/belum login.", target_chat_id=admin_chat_id)
-            return False
-
-        screenshot_filename = f"screenshot_{int(time.time())}.png"
-        try:
-            # Pastikan berada di dashboard sebelum reload dan screenshot
-            if self.page.url != self.url:
-                await self.page.goto(self.url, wait_until='domcontentloaded')
-                
-            print("🔄 Performing page reload...")
-            await self.page.reload(wait_until='networkidle') 
-            print(f"📸 Taking screenshot: {screenshot_filename}")
-            await self.page.screenshot(path=screenshot_filename, full_page=True)
-            print("📤 Sending screenshot to Admin Telegram...")
-            caption = f"✅ Page Reloaded successfully at <code>{datetime.now().strftime('%H:%M:%S')}</code>"
-            success = send_photo_tg(screenshot_filename, caption, target_chat_id=admin_chat_id)
-            return success
-        except Exception as e:
-            print(f"❌ Error during refresh/screenshot: {e}")
-            send_tg(f"⚠️ <b>Error Refresh/Screenshot</b>: <code>{e.__class__.__name__}: {e}</code>", target_chat_id=admin_chat_id)
-            return False
-        finally:
-            if os.path.exists(screenshot_filename):
-                os.remove(screenshot_filename)
-                print(f"🗑️ Cleaned up {screenshot_filename}")
+class OTPFilter:
+    def __init__(self):
+        self.cache = {}
+    def filter(self, msgs):
+        new = []
+        for m in msgs:
+            key = f"{m['phone']}_{m['otp']}"
+            if key not in self.cache:
+                self.cache[key] = True
+                new.append(m)
+        return new
 
 monitor = SMSMonitor()
+otp_filter = OTPFilter()
 
-# ================= Status Global dan Fungsi Update =================
-start = time.time()
-total_sent = 0
+# ================= Main Loop & Telegram =================
 
-BOT_STATUS = {
-    "status": "Initializing...",
-    "uptime": "--",
-    "total_otps_sent": 0,
-    "last_check": "Never",
-    "cache_size": 0,
-    "monitoring_active": False, 
-    "last_cleanup_gmt_date": "N/A"
-}
-
-def update_global_status():
-    global BOT_STATUS
-    global total_sent
-    uptime_seconds = time.time() - start
-    
-    BOT_STATUS["uptime"] = f"{int(uptime_seconds//3600)}h {int((uptime_seconds%3600)//60)}m {int(uptime_seconds%60)}s"
-    BOT_STATUS["total_otps_sent"] = total_sent
-    BOT_STATUS["last_check"] = datetime.now().strftime("%H:%M:%S")
-    BOT_STATUS["cache_size"] = len(otp_filter.cache)
-    BOT_STATUS["monitoring_active"] = BOT_STATUS["monitoring_active"] 
-    BOT_STATUS["status"] = "Running" if BOT_STATUS["monitoring_active"] and monitor.is_logged_in else ("Paused (Logged In)" if monitor.is_logged_in and not BOT_STATUS["monitoring_active"] else "Paused (Not Logged In)")
-    BOT_STATUS["last_cleanup_gmt_date"] = otp_filter.last_cleanup_date_gmt 
-    
-    # Perbarui status jika monitoring aktif tetapi belum login
-    if BOT_STATUS["monitoring_active"] and not monitor.is_logged_in:
-         BOT_STATUS["status"] = "Running (Awaiting Login)"
-         
-    return BOT_STATUS
-
-# ================= FUNGSI UTAMA LOOP DAN COMMAND CHECK =================
-
-def check_cmd(stats):
-    global LAST_ID
-    global BOT_STATUS
-    global AWAITING_CREDENTIALS
-    
-    if ADMIN_ID is None: return
-
-    try:
-        upd = requests.get(
-            f"https://api.telegram.org/bot{BOT}/getUpdates?offset={LAST_ID+1}",
-            timeout=15  
-        ).json()
-
-        for u in upd.get("result",[]):
-            LAST_ID = u["update_id"]
-            msg = u.get("message",{})
-            text = msg.get("text","")
-            user_id = msg.get("from", {}).get("id")
-            chat_id = msg.get("chat", {}).get("id")
-
-            if user_id == ADMIN_ID:
-                
-                # --- MODE 2: AWAITING CREDENTIALS ---
-                if AWAITING_CREDENTIALS:
-                    
-                    # Split berdasarkan newline atau spasi
-                    # Mengatasi format yang mungkin dikirim Admin (satu baris dipisah spasi atau dua baris dipisah newline)
-                    parts = text.split() 
-                    if len(parts) != 2 and '\n' in text:
-                        parts = text.split('\n')
-                    
-                    # Cek jika formatnya (email\npassword) atau (email password)
-                    if len(parts) == 2:
-                        
-                        username_input = parts[0].strip()
-                        password_input = parts[1].strip()
-                        
-                        monitor._temp_username = username_input
-                        monitor._temp_password = password_input
-                        AWAITING_CREDENTIALS = False # Selesai menunggu
-                        
-                        send_tg("⏳ Kredensial diterima. Executing login to <b>X.MNITNetwork</b>...", with_inline_keyboard=False, target_chat_id=chat_id)
-                        
-                        if GLOBAL_ASYNC_LOOP:
-                            asyncio.run_coroutine_threadsafe(monitor.login_and_notify(admin_chat_id=chat_id), GLOBAL_ASYNC_LOOP)
-                        else:
-                            send_tg("❌ Loop error: Global loop not set.", target_chat_id=chat_id)
-                            
-                    else:
-                        # Jika Admin mengirim pesan lain saat bot menunggu
-                        send_tg("⚠️ Format kredensial salah. Harap kirim <b>Email/Username dan Password</b> di dua baris terpisah atau dalam satu pesan, contoh:\n<code>muhamadreyhan0073@gmail.com\nfd140206</code>", target_chat_id=chat_id)
-                        
-                    continue # Langsung ke update berikutnya
-
-                # --- MODE 1: COMMAND MODE ---
-                
-                if text == "/status":
-                    requests.post(
-                        f"https://api.telegram.org/bot{BOT}/sendMessage",
-                        data={'chat_id': chat_id, 'text': get_status_message(stats), 'parse_mode': 'HTML'}
-                    )
-                elif text == "/refresh":
-                    send_tg("⏳ Executing page refresh and screenshot...", with_inline_keyboard=False, target_chat_id=chat_id)
-                    if GLOBAL_ASYNC_LOOP:
-                        asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(admin_chat_id=chat_id), GLOBAL_ASYNC_LOOP)
-                    else:
-                        send_tg("❌ Loop error: Global loop not set.", target_chat_id=chat_id)
-                        
-                elif text.lower() == "/login": 
-                    
-                    if monitor.is_logged_in:
-                         send_tg("✅ <b>Anda Sudah login</b>. Silahkan kirim perintah <code>/startnew</code>", target_chat_id=chat_id)
-                         continue
-                         
-                    AWAITING_CREDENTIALS = True
-                    send_tg(
-                        "🔒 <b>Mode Kredensial Aktif</b>\n\n"
-                        "<b>Anda belum login</b>. Silakan kirim <b>Email/Username</b> dan <b>Password</b> dengan format berikut:\n\n"
-                        "Contoh:\n"
-                        "<code>muhamadreyhan0073@gmail.com\n"
-                        "fd140206</code>\n\n"
-                        "<i>(Bot akan memproses pesan berikutnya sebagai kredensial)</i>",
-                        target_chat_id=chat_id
-                    )
-                        
-                elif text == "/startnew":
-                    BOT_STATUS["monitoring_active"] = True
-                    if monitor.is_logged_in:
-                         send_tg("✅ Monitoring started/resumed. Checking for new OTPs...", target_chat_id=chat_id)
-                    else:
-                         send_tg("⚠️ Monitoring started, but you are not logged in yet. Please use <code>/login</code> to enter credentials.", target_chat_id=chat_id)
-                
-                elif text == "/stop":
-                    BOT_STATUS["monitoring_active"] = False
-                    send_tg("⏸️ Monitoring paused. Use <code>/startnew</code> to resume.", target_chat_id=chat_id)
-                
-                elif text == "/clear-cache":
-                    # Menjalankan fungsi clear cache
-                    now_gmt_str = datetime.now(timezone.utc).strftime('%Y%m%d')
-                    otp_filter.cache = {}
-                    otp_filter.last_cleanup_date_gmt = now_gmt_str
-                    otp_filter._save()
-                    update_global_status() 
-                    send_tg(f"🗑️ <b>OTP Cache Cleared</b>. Cache size: <code>{BOT_STATUS['cache_size']} items</code>", target_chat_id=chat_id)
-
-
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Error during getUpdates: {e}")
-    except Exception as e:
-        print(f"❌ Unknown Error in check_cmd: {e}")
-
-async def monitor_sms_loop():
-    global total_sent
-    global BOT_STATUS
-    
+async def main_loop():
     async with async_playwright() as p:
-        try:
-            # PENTING: Perlu memastikan Chrome/Edge berjalan dengan --remote-debugging-port=9222
-            await monitor.initialize(p)
-        except Exception as e:
-            print(f"FATAL ERROR: Failed to initialize SMSMonitor (Playwright/Browser connection). {e}")
-            send_tg("🚨 <b>FATAL ERROR</b>: Gagal terhubung ke Chrome/Playwright. Pastikan Chrome berjalan dengan <code>--remote-debugging-port=9222</code>.", target_chat_id=ADMIN_ID)
-            BOT_STATUS["status"] = "FATAL ERROR"
-            return 
-    
-        BOT_STATUS["monitoring_active"] = False 
+        await monitor.initialize(p)
+        print("🚀 Monitor Berjalan...")
         
-        # Kirim pesan awal dan minta login
-        initial_msg = (
-            "✅ <b>BOT X.MNIT ACTIVE MONITORING IS RUNNING.</b>\n\n"
-            "⚠️ <b>PERHATIAN</b>: Monitoring saat ini <b>PAUSED</b> dan belum login.\n\n"
-            "Silakan gunakan perintah admin berikut:\n"
-            "1. <b>Login & Kirim Kredensial</b>: <code>/login</code> (Bot akan meminta Email dan Password secara terpisah)\n" 
-            "2. <b>Mulai Monitoring</b>: <code>/startnew</code> (untuk memulai/melanjutkan cek OTP)"
-        )
-        send_tg(initial_msg, with_inline_keyboard=False, target_chat_id=ADMIN_ID)
-
-
         while True:
             try:
-                await monitor.check_url_login_status() 
-
-                # Cek: Harus monitoring_active DAN harus is_logged_in
-                if BOT_STATUS["monitoring_active"] and monitor.is_logged_in:
+                # Cek Status Login
+                monitor.is_logged_in = "mdashboard" in monitor.page.url
+                
+                if monitor.is_logged_in:
+                    data = await monitor.fetch_sms()
+                    new_msgs = otp_filter.filter(data)
                     
-                    msgs = await monitor.fetch_sms()
-                    
-                    # Filter dan tambahkan ke cache
-                    new = otp_filter.filter(msgs)
-
-                    if new:
-                        print(f"✅ Found {len(new)} new OTP(s). Sending to Telegram one by one with 2-second delay...")
+                    for m in new_msgs:
+                        msg_text = format_otp_message(m)
+                        # Kirim ke Telegram
+                        requests.post(f"https://api.telegram.org/bot{BOT}/sendMessage", 
+                                     data={'chat_id': CHAT, 'text': msg_text, 'parse_mode': 'HTML'})
                         
-                        for i, otp_data in enumerate(new):
-                            save_otp_to_json(otp_data)
+                        # Simpan JSON
+                        if not os.path.exists(os.path.dirname(OTP_SAVE_FILE)):
+                            os.makedirs(os.path.dirname(OTP_SAVE_FILE))
+                        with open(OTP_SAVE_FILE, "a") as f:
+                            f.write(json.dumps(m) + "\n")
                             
-                            message_text = format_otp_message(otp_data)
-                            print(f"   -> Sending OTP {i+1}/{len(new)}: {otp_data['otp']} for {otp_data['phone']}")
-                            
-                            send_tg(message_text, with_inline_keyboard=True)
-                            total_sent += 1
-                            
-                            await asyncio.sleep(2) 
-                        
-                elif BOT_STATUS["monitoring_active"] and not monitor.is_logged_in:
-                    print("⚠️ Monitoring active but paused. Awaiting successful login...")
-                    
-                else: # BOT_STATUS["monitoring_active"] is False
-                    print("⏸️ Monitoring paused.")
-
-
             except Exception as e:
-                error_message = f"Error during fetch/send: {e.__class__.__name__}: {e}"
-                print(error_message)
-
-            stats = update_global_status()
-            # Cek perintah dari Telegram
-            check_cmd(stats)
+                print(f"Error: {e}")
             
-            # Waktu tunggu antara cek (misal: 5 detik)
-            await asyncio.sleep(5) 
-
-# ================= FLASK WEB SERVER UNTUK API DAN DASHBOARD =================
-
-app = Flask(__name__, template_folder='templates')
-
-@app.route('/', methods=['GET'])
-def index():
-    # Pastikan Anda memiliki file templates/dashboard.html di direktori yang sama
-    return render_template('dashboard.html') 
-
-@app.route('/api/status', methods=['GET'])
-def get_status_json():
-    update_global_status() 
-    return jsonify(BOT_STATUS)
-
-@app.route('/manual-check', methods=['GET'])
-def manual_check():
-    if ADMIN_ID is None: return jsonify({"message": "Error: Admin ID not configured for this action."}), 400
-    if GLOBAL_ASYNC_LOOP is None:
-        return jsonify({"message": "Error: Asyncio loop not initialized."}), 500
-    if not monitor.is_logged_in:
-        return jsonify({"message": "Error: Not logged in. Please /login first via Telegram or login manually."}), 400
-        
-    try:
-        # Jalankan coroutine di event loop utama
-        asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(admin_chat_id=ADMIN_ID), GLOBAL_ASYNC_LOOP)
-        return jsonify({"message": "Halaman X.MNIT Network Refresh & Screenshot sedang dikirim ke Admin Telegram."})
-    except RuntimeError as e:
-        return jsonify({"message": f"Fatal Error: Asyncio loop issue ({e.__class__.__name__}). Cek log RDP Anda."}), 500
-    except Exception as e:
-        return jsonify({"message": f"External Error: Gagal menjalankan refresh. Cek log RDP Anda: {e.__class__.__name__}"}), 500
-
-@app.route('/telegram-status', methods=['GET'])
-def send_telegram_status_route():
-    if ADMIN_ID is None: return jsonify({"message": "Error: Admin ID not configured."}), 400
-    
-    stats_msg = get_status_message(update_global_status())
-    send_tg(stats_msg, target_chat_id=ADMIN_ID)
-    
-    return jsonify({"message": "Status sent to Telegram Admin."})
-
-@app.route('/clear-cache', methods=['GET'])
-def clear_otp_cache_route():
-    global otp_filter
-    
-    now_gmt_str = datetime.now(timezone.utc).strftime('%Y%m%d')
-    
-    otp_filter.cache = {}
-    otp_filter.last_cleanup_date_gmt = now_gmt_str
-    otp_filter._save()
-    
-    update_global_status() 
-    send_tg(f"🗑️ <b>OTP Cache Cleared Manually</b>. Cache size: <code>{BOT_STATUS['cache_size']} items</code>", target_chat_id=ADMIN_ID)
-    return jsonify({"message": f"OTP Cache cleared manually. New size: {BOT_STATUS['cache_size']}."})
-
-@app.route('/test-message', methods=['GET'])
-def test_message_route():
-    test_data = {
-        "otp": "123456",
-        "phone": "+12345678999",
-        "service": "Facebook",
-        "range": "Zura Store",
-        "timestamp": datetime.now().strftime("%H:%M:%S"),
-        "raw_message": "<#> 123456 — Your code for Facebook Test Service"
-    }
-    
-    test_msg = format_otp_message(test_data).replace("🔐 <b>New OTP Received</b>", "🧪 <b>TEST MESSAGE FROM DASHBOARD</b>")
-    
-    send_tg(test_msg)
-    return jsonify({"message": "Test message sent to main channel."})
-
-@app.route('/start-monitor', methods=['GET'])
-def start_monitor_route():
-    BOT_STATUS["monitoring_active"] = True
-    send_tg("▶️ Monitoring started/resumed via Dashboard API.", target_chat_id=ADMIN_ID)
-    return jsonify({"message": "Monitor status set to Running."})
-
-@app.route('/stop-monitor', methods=['GET'])
-def stop_monitor_route():
-    BOT_STATUS["monitoring_active"] = False
-    send_tg("⏸️ Monitoring paused via Dashboard API.", target_chat_id=ADMIN_ID)
-    return jsonify({"message": "Monitor status set to Paused."})
-
-
-# ================= FUNGSI UTAMA START =================
-
-def run_flask():
-    """Fungsi untuk menjalankan Flask di thread terpisah."""
-    port = int(os.environ.get('PORT', 5000))
-    
-    global GLOBAL_ASYNC_LOOP
-    if GLOBAL_ASYNC_LOOP and not asyncio._get_running_loop():
-        # Memastikan event loop terpasang ke thread ini
-        asyncio.set_event_loop(GLOBAL_ASYNC_LOOP) 
-        
-    print(f"✅ Flask API & Dashboard running on http://127.0.0.1:{port}")
-    
-    # Perubahan: Menggunakan 0.0.0.0 agar dapat diakses dari luar localhost (jika perlu untuk ngrok)
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+            await asyncio.sleep(10) # Cek tiap 10 detik
 
 if __name__ == "__main__":
-    if not BOT or not CHAT or not ADMIN_ID:
-        print("FATAL ERROR: Pastikan TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, dan TELEGRAM_ADMIN_ID ada di file .env.")
-    else:
-        print("Starting SMS Monitor Bot and Flask API...")
-        
-        print("\n=======================================================")
-        print("     ⚠️  PENTING: JALANKAN CHROME/EDGE TERPISAH   ⚠️")
-        print("     Gunakan perintah ini di terminal terpisah:")
-        print('     chrome.exe --remote-debugging-port=9222 --user-data-dir="C:\\temp\\playwright_profile"')
-        print("=======================================================\n")
-
-        try:
-            # Coba ambil loop yang sudah ada
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            # Jika tidak ada, buat loop baru
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        GLOBAL_ASYNC_LOOP = loop 
-        
-        # 1. Mulai Flask di thread terpisah
-        flask_thread = Thread(target=run_flask)
-        flask_thread.daemon = True
-        flask_thread.start()
-        
-        # 2. Mulai loop asinkron monitoring
-        try:
-            loop.run_until_complete(monitor_sms_loop())
-        except KeyboardInterrupt:
-            print("Bot shutting down...")
-        finally:
-            print("Bot core shutdown complete.")
+    asyncio.run(main_loop())
