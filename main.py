@@ -1,7 +1,7 @@
 import asyncio
 from playwright.async_api import async_playwright 
 from bs4 import BeautifulSoup
-from datetime import datetime, timezone 
+from datetime import datetime, timezone, timedelta
 import re
 import json
 import os
@@ -94,11 +94,11 @@ def get_user_data(phone_number: str) -> Dict[str, Any]:
     return {"username": "unknown", "user_id": None}
 
 def create_inline_keyboard(otp: str):
-    """Menyusun keyboard: OTP & Owner SEJAJAR, Get Number di bawah."""
+    """Menyusun keyboard dengan fitur Copy Text pada OTP (Bot API 7.0+)."""
     keyboard = {
         "inline_keyboard": [
             [
-                {"text": f"📋 {otp}", "callback_data": f"copy_{otp}"}, # Teks tombol salin
+                {"text": f"📋 {otp}", "copy_text": {"text": otp}},
                 {"text": "🎭 Owner", "url": TELEGRAM_ADMIN_LINK}
             ],
             [
@@ -205,6 +205,7 @@ def get_status_message(stats):
 🔍 Last Check: <code>{stats['last_check']}</code>
 💾 Cache Size: <code>{stats['cache_size']} items</code>
 📅 Last Cache Reset (GMT): <code>{stats['last_cleanup_gmt_date']}</code>
+🕒 Last Daily Refresh (07:01): <code>{stats['last_refresh_0701']}</code>
 
 <i>Bot is running</i>"""
 
@@ -294,11 +295,12 @@ otp_filter = OTPFilter()
 def send_tg(text, with_inline_keyboard=False, target_chat_id=None, otp_code=None):
     chat_id_to_use = target_chat_id if target_chat_id is not None else CHAT
     if not BOT or not chat_id_to_use: return
+    # Menggunakan JSON payload agar copy_text terkirim dengan benar
     payload = {'chat_id': chat_id_to_use, 'text': text, 'parse_mode': 'HTML'}
     if with_inline_keyboard and otp_code:
-        payload['reply_markup'] = create_inline_keyboard(otp_code)
+        payload['reply_markup'] = json.loads(create_inline_keyboard(otp_code))
     try:
-        requests.post(f"https://api.telegram.org/bot{BOT}/sendMessage", data=payload, timeout=15)
+        requests.post(f"https://api.telegram.org/bot{BOT}/sendMessage", json=payload, timeout=15)
     except Exception as e:
         print(f"❌ Telegram Error: {e}")
 
@@ -370,6 +372,7 @@ class SMSMonitor:
 
     async def fetch_sms(self) -> List[Dict[str, Any]]:
         if not self.page or not self.is_logged_in: return []
+        # Perubahan: Hanya navigasi jika URL berubah, tidak refresh paksa setiap loop
         if self.page.url != self.url:
             try: await self.page.goto(self.url, wait_until='domcontentloaded', timeout=15000)
             except: return []
@@ -419,6 +422,7 @@ class SMSMonitor:
             await self.page.reload(wait_until='networkidle') 
             await self.page.screenshot(path=path, full_page=True)
             send_photo_tg(path, f"✅ Reloaded at <code>{datetime.now().strftime('%H:%M:%S')}</code>", target_chat_id=admin_chat_id)
+            BOT_STATUS["last_refresh_0701"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             return True
         except: return False
         finally:
@@ -429,7 +433,16 @@ monitor = SMSMonitor()
 # ================= Status Global =================
 start = time.time()
 total_sent = 0
-BOT_STATUS = {"status": "Initializing...", "uptime": "--", "total_otps_sent": 0, "last_check": "Never", "cache_size": 0, "monitoring_active": False, "last_cleanup_gmt_date": "N/A"}
+BOT_STATUS = {
+    "status": "Initializing...", 
+    "uptime": "--", 
+    "total_otps_sent": 0, 
+    "last_check": "Never", 
+    "cache_size": 0, 
+    "monitoring_active": False, 
+    "last_cleanup_gmt_date": "N/A",
+    "last_refresh_0701": "Never"
+}
 
 def update_global_status():
     global total_sent
@@ -486,6 +499,14 @@ async def monitor_sms_loop():
     
         send_tg("✅ <b>BOT ZURA ACTIVE</b>\nUse <code>/login</code> then <code>/startnew</code>", target_chat_id=ADMIN_ID)
         while True:
+            # --- LOGIKA DAILY REFRESH (07:01 WIB) ---
+            now_wib = datetime.now(timezone.utc) + timedelta(hours=7)
+            if now_wib.hour == 7 and now_wib.minute == 1 and now_wib.second < 10:
+                last_ref = BOT_STATUS["last_refresh_0701"]
+                # Cegah refresh berkali-kali di menit yang sama
+                if last_ref == "Never" or last_ref[:16] != now_wib.strftime("%Y-%m-%d %H:%M"):
+                    await monitor.refresh_and_screenshot(ADMIN_ID)
+
             try:
                 await monitor.check_url_login_status() 
                 if BOT_STATUS["monitoring_active"] and monitor.is_logged_in:
