@@ -98,7 +98,7 @@ def create_inline_keyboard(otp: str):
     keyboard = {
         "inline_keyboard": [
             [
-                {"text": f"📋 {otp}", "copy_text": {"text": otp}},
+                {"text": f"{otp}", "copy_text": {"text": otp}},
                 {"text": "🎭 Owner", "url": TELEGRAM_ADMIN_LINK}
             ],
             [
