@@ -42,6 +42,7 @@ LAST_ID = 0
 # ================= Konfigurasi File Path =================
 OTP_SAVE_FOLDER = os.path.join("..", "get")
 OTP_SAVE_FILE = os.path.join(OTP_SAVE_FOLDER, "smc.json")
+WAIT_JSON_FILE = os.path.join(OTP_SAVE_FOLDER, "wait.json") # File sumber data user
 # ---------------------------------------------------------
 
 # ================= Global State for Asyncio Loop & Command =================
@@ -61,18 +62,47 @@ COUNTRY_EMOJI = {
     "SIERRA LEONE": "🇸🇱",
     "MADAGASCAR": "🇲🇬",
     "AFGANISTAN": "🇦🇫",
-    "ZURA STORE": "🇮🇩"
+    "ZURA STORE": "🇮🇩",
+    "LEBANON": "🇱🇧",
+    "QATAR": "🇶🇦"
 }
 
 def get_country_emoji(country_name: str) -> str:
     return COUNTRY_EMOJI.get(country_name.strip().upper(), "")
 
-def create_inline_keyboard():
+def get_user_data(phone_number: str) -> Dict[str, Any]:
+    """Mencari data username dari wait.json berdasarkan kecocokan nomor."""
+    if not os.path.exists(WAIT_JSON_FILE):
+        return {"username": "unknown", "user_id": None}
+    
+    try:
+        with open(WAIT_JSON_FILE, 'r') as f:
+            wait_list = json.load(f)
+            # Bersihkan nomor HP target untuk perbandingan
+            clean_target = re.sub(r'[^\d]', '', phone_number)
+            
+            for entry in wait_list:
+                clean_entry = re.sub(r'[^\d]', '', str(entry.get("number", "")))
+                if clean_target == clean_entry:
+                    return {
+                        "username": entry.get("username", "unknown"),
+                        "user_id": entry.get("user_id")
+                    }
+    except Exception as e:
+        print(f"❌ Error reading wait.json: {e}")
+    
+    return {"username": "unknown", "user_id": None}
+
+def create_inline_keyboard(otp: str):
+    """Menyusun keyboard: OTP & Owner SEJAJAR, Get Number di bawah."""
     keyboard = {
         "inline_keyboard": [
             [
-                {"text": "➡️ GetNumber", "url": TELEGRAM_BOT_LINK},
-                {"text": "👤 Admin", "url": TELEGRAM_ADMIN_LINK}
+                {"text": f"📋 {otp}", "callback_data": f"copy_{otp}"}, # Teks tombol salin
+                {"text": "🎭 Owner", "url": TELEGRAM_ADMIN_LINK}
+            ],
+            [
+                {"text": "📞 Get Number", "url": TELEGRAM_BOT_LINK}
             ]
         ]
     }
@@ -85,50 +115,47 @@ def clean_phone_number(phone):
         cleaned = '+' + cleaned
     return cleaned or phone
 
-def mask_phone_number(phone, visible_start=4, visible_end=4):
+def mask_phone_number_zura(phone):
+    """Masking khusus format ZuraStore: +9617***7299"""
     if not phone or phone == "N/A": return phone
-    prefix = ""
-    if phone.startswith('+'):
-        prefix = '+'
-        digits = phone[1:]
-    else:
-        digits = phone
-        
-    if len(digits) <= visible_start + visible_end:
-        return phone
-        
-    digits = re.sub(r'[^\d]', '', digits)
-
-    start_part = digits[:visible_start]
-    end_part = digits[-visible_end:]
-    mask_length = len(digits) - visible_start - visible_end
-    masked_part = '*' * mask_length
-    return prefix + start_part + masked_part + end_part
+    digits = re.sub(r'[^\d]', '', phone)
+    if len(digits) < 7: return phone
+    
+    prefix = phone[0] if phone.startswith('+') else ""
+    start_part = digits[:5]
+    end_part = digits[-4:]
+    return f"{prefix}{start_part}***{end_part}"
 
 def format_otp_message(otp_data: Dict[str, Any]) -> str:
-    """Memformat data OTP menjadi pesan Telegram dengan emoji."""
+    """Format pesan sesuai permintaan user ZuraStore."""
     otp = otp_data.get('otp', 'N/A')
     phone = otp_data.get('phone', 'N/A')
-    masked_phone = mask_phone_number(phone, visible_start=4, visible_end=4)
+    masked_phone = mask_phone_number_zura(phone)
     service = otp_data.get('service', 'Unknown')
     range_text = otp_data.get('range', 'N/A')
-    full_message = otp_data.get('raw_message', 'N/A')
-    
     emoji = get_country_emoji(range_text)
-    full_message_escaped = full_message.replace('<', '&lt;').replace('>', '&gt;') 
     
-    return f"""🔐 <b>New OTP Received</b>
+    # Ambil data user dari wait.json
+    user_info = get_user_data(phone)
+    username = user_info['username']
+    user_tag = f"@{username.replace('@', '')}" if username != "unknown" else "unknown"
+    
+    return (
+        f"💭 <b>New Message Received</b>\n\n"
+        f"<b>👤 User:</b> {user_tag}\n"
+        f"<b>📱 Number:</b> <code>{masked_phone}</code>\n"
+        f"<b>🌍 Country:</b> <b>{range_text} {emoji}</b>\n"
+        f"<b>✅ Service:</b> <b>{service}</b>\n\n"
+        f"🔐 OTP: <code>{otp}</code>\n\n"
+        f"💸 <i>Greetings From ZuraStore </i> 💸"
+    )
 
-🌍 Country: <b>{range_text} {emoji}</b>
-
-📱 Number: <code>{masked_phone}</code>
-🌐 Service: <b>{service}</b>
-🔢 OTP: <code>{otp}</code>
-
-FULL MESSAGES:
-<blockquote>{full_message_escaped}</blockquote>"""
+# =================================================================
+# 🎯 FUNGSI UTAMA PERBAIKAN: EKSTRAKSI OTP DENGAN TANDA HUBUNG/SPASI
+# =================================================================
 
 def extract_otp_from_text(text):
+    """Fungsi ekstraksi OTP yang fleksibel."""
     if not text: return None
     patterns = [ 
         r'<#>\s*([\d\s-]+)\s*—',  
@@ -156,15 +183,9 @@ def extract_otp_from_text(text):
 def clean_service_name(service):
     if not service: return "Unknown"
     maps = {
-        'facebook': 'Facebook',
-        'whatsapp': 'WhatsApp',
-        'instagram': 'Instagram',
-        'telegram': 'Telegram',
-        'google': 'Google',
-        'twitter': 'Twitter',
-        'linkedin': 'LinkedIn',
-        'tiktok': 'TikTok', 
-        'mnitnetwork': 'M-NIT Network',
+        'facebook': 'Facebook', 'whatsapp': 'WhatsApp', 'instagram': 'Instagram',
+        'telegram': 'Telegram', 'google': 'Google', 'twitter': 'Twitter',
+        'linkedin': 'LinkedIn', 'tiktok': 'TikTok', 'mnitnetwork': 'M-NIT Network',
         'laz+nxcar': 'Facebook',
     }
     s_lower = service.strip().lower()
@@ -207,7 +228,9 @@ def save_otp_to_json(otp_data: Dict[str, Any]):
         with open(OTP_SAVE_FILE, 'w') as f:
             json.dump(existing_data, f, indent=2)
     except Exception as e:
-        print(f"❌ ERROR: Failed to save OTP to JSON file {OTP_SAVE_FILE}: {e}")
+        print(f"❌ ERROR: Failed to save OTP to JSON file: {e}")
+
+# ================= OTP Filter Class =================
 
 class OTPFilter:
     CLEANUP_KEY = '__LAST_CLEANUP_GMT__' 
@@ -216,6 +239,7 @@ class OTPFilter:
         self.cache = self._load()
         self.last_cleanup_date_gmt = self.cache.pop(self.CLEANUP_KEY, '19700101') 
         self._cleanup() 
+        
     def _load(self) -> Dict[str, Dict[str, Any]]:
         if os.path.exists(self.file):
             try:
@@ -224,29 +248,36 @@ class OTPFilter:
                 else: return {}
             except: return {}
         return {}
+        
     def _save(self): 
         temp_cache = self.cache.copy()
         temp_cache[self.CLEANUP_KEY] = self.last_cleanup_date_gmt
         json.dump(temp_cache, open(self.file,'w'), indent=2)
+    
     def _cleanup(self):
         now_gmt = datetime.now(timezone.utc).strftime('%Y%m%d')
         if now_gmt > self.last_cleanup_date_gmt:
             self.cache = {} 
             self.last_cleanup_date_gmt = now_gmt
             self._save()
-        else: self._save()
+        else:
+            self._save()
+        
     def key(self, d: Dict[str, Any]) -> str: 
         return f"{d.get('otp')}_{d.get('phone')}"
+    
     def is_dup(self, d: Dict[str, Any]) -> bool:
         self._cleanup() 
         key = self.key(d)
         if not key or key.split('_')[0] == 'None': return False 
         return key in self.cache
+        
     def add(self, d: Dict[str, Any]):
         key = self.key(d)
         if not key or key.split('_')[0] == 'None': return
         self.cache[key] = {'timestamp':datetime.now().isoformat()} 
         self._save()
+        
     def filter(self, lst: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         out = []
         for d in lst:
@@ -258,27 +289,31 @@ class OTPFilter:
 
 otp_filter = OTPFilter()
 
-def send_tg(text, with_inline_keyboard=False, target_chat_id=None):
+# ================= Telegram Functionality =================
+
+def send_tg(text, with_inline_keyboard=False, target_chat_id=None, otp_code=None):
     chat_id_to_use = target_chat_id if target_chat_id is not None else CHAT
     if not BOT or not chat_id_to_use: return
     payload = {'chat_id': chat_id_to_use, 'text': text, 'parse_mode': 'HTML'}
-    if with_inline_keyboard:
-        payload['reply_markup'] = create_inline_keyboard()
+    if with_inline_keyboard and otp_code:
+        payload['reply_markup'] = create_inline_keyboard(otp_code)
     try:
         requests.post(f"https://api.telegram.org/bot{BOT}/sendMessage", data=payload, timeout=15)
-    except: pass
+    except Exception as e:
+        print(f"❌ Telegram Error: {e}")
 
 def send_photo_tg(photo_path, caption="", target_chat_id=None):
     chat_id_to_use = target_chat_id if target_chat_id is not None else CHAT
     if not BOT or not chat_id_to_use: return False
-    url = f"https://api.telegram.org/bot{BOT}/sendPhoto"
     try:
         with open(photo_path, 'rb') as photo_file:
             files = {'photo': photo_file}
             data = {'chat_id': chat_id_to_use, 'caption': caption, 'parse_mode': 'HTML'}
-            response = requests.post(url, files=files, data=data, timeout=20)
-        return response.ok
-    except: return False
+            requests.post(f"https://api.telegram.org/bot{BOT}/sendPhoto", files=files, data=data, timeout=20)
+        return True
+    except Exception as e:
+        print(f"❌ Photo Error: {e}")
+        return False
 
 # ================= Scraper & Monitor Class =================
 
@@ -294,125 +329,112 @@ class SMSMonitor:
     async def initialize(self, p_instance):
         self.browser = await p_instance.chromium.connect_over_cdp("http://127.0.0.1:9222")
         context = self.browser.contexts[0]
-        # UPDATE: Memberikan izin clipboard
-        await context.grant_permissions(['clipboard-read', 'clipboard-write'])
         self.page = await context.new_page()
         print("✅ Playwright page connected successfully.")
 
     async def check_url_login_status(self) -> bool:
-        if not self.page:
-            self.is_logged_in = False
-            return False
+        if not self.page: return False
         try:
             current_url = self.page.url
             self.is_logged_in = current_url.startswith("https://x.mnitnetwork.com/mdashboard")
-        except:
-            self.is_logged_in = False
-        return self.is_logged_in
+            return self.is_logged_in
+        except: return False
 
     async def login(self):
         if not self.page: raise Exception("Page not initialized.")
-        u, p = self._temp_username, self._temp_password
-        if not u or not p: raise Exception("No credentials.")
+        USERNAME, PASSWORD = self._temp_username, self._temp_password
+        if not USERNAME or not PASSWORD: raise Exception("Credentials not found.")
+        
         await self.page.goto(LOGIN_URL, wait_until='load', timeout=15000) 
         await self.page.wait_for_selector('input[type="email"]', timeout=10000) 
-        await self.page.type('input[type="email"]', u, delay=100) 
-        await self.page.type('input[type="password"]', p, delay=100)
+        await self.page.type('input[type="email"]', USERNAME, delay=100) 
+        await self.page.type('input[type="password"]', PASSWORD, delay=100)
         await self.page.click('button[type="submit"]') 
+        
         try:
-            await self.page.wait_for_url(re.compile(r".*/mdashboard.*"), timeout=30000) 
+            await self.page.wait_for_url(re.compile(r"https:\/\/x\.mnitnetwork\.com\/mdashboard.*"), timeout=30000) 
             self.is_logged_in = True
             self._temp_username = self._temp_password = None
             return True
         except Exception as e:
             self.is_logged_in = False
-            shot = f"fail_{int(time.time())}.png"
-            await self.page.screenshot(path=shot)
-            send_photo_tg(shot, f"❌ Login Fail: {str(e)[:100]}", ADMIN_ID)
-            if os.path.exists(shot): os.remove(shot)
             raise e
 
     async def login_and_notify(self, admin_chat_id):
         try:
             if await self.login():
-                send_tg("✅ Login success! Use /startnew", target_chat_id=admin_chat_id)
+                await self.refresh_and_screenshot(admin_chat_id)
+                send_tg(f"✅ Login berhasil! Mulai monitoring: <code>/startnew</code>", target_chat_id=admin_chat_id)
         except Exception as e:
-            send_tg(f"❌ Login Failed: {str(e)}", target_chat_id=admin_chat_id)
+            send_tg(f"❌ Login GAGAL: <code>{str(e)[:50]}</code>", target_chat_id=admin_chat_id)
 
-    # 🎯 UPDATE LOGIKA FETCH SMS (Script Asli Anda di-update untuk Handle Clipboard)
     async def fetch_sms(self) -> List[Dict[str, Any]]:
         if not self.page or not self.is_logged_in: return []
         if self.page.url != self.url:
-            try: await self.page.goto(self.url, wait_until='domcontentloaded')
+            try: await self.page.goto(self.url, wait_until='domcontentloaded', timeout=15000)
             except: return []
+                
+        try: await self.page.wait_for_selector('tbody', timeout=10000)
+        except: return []
 
-        # Ambil semua baris tabel
-        rows = await self.page.query_selector_all("tbody tr")
+        html = await self.page.content()
+        soup = BeautifulSoup(html, "html.parser")
         messages = []
-
-        for row in rows:
-            # Cari indikator status success
-            status_el = await row.query_selector("span.uppercase")
-            status_text = await status_el.inner_text() if status_el else ""
-            if "SUCCESS" not in status_text.upper(): continue
-
-            # Ambil Nomor HP & OTP Mentah dari layar
-            phone_el = await row.query_selector("span.font-mono")
-            phone_raw = await phone_el.inner_text() if phone_el else "N/A"
+        tbody = soup.find("tbody", class_="text-sm divide-y divide-white/5")
+        if not tbody: return []
             
-            otp_el = await row.query_selector("span.tracking-widest")
-            otp_raw = await otp_el.inner_text() if otp_el else ""
+        rows = tbody.find_all("tr")
+        SERVICE_KEYWORDS = r'(facebook|whatsapp|instagram|telegram|google|twitter|linkedin|tiktok)'
 
-            country_el = await row.query_selector("td:nth-child(2) span")
-            country_text = await country_el.inner_text() if country_el else "N/A"
-
-            # KLIK TOMBOL COPY UNTUK MENDAPATKAN PESAN FULL
-            raw_message_full = f"OTP: {otp_raw}" # Fallback
-            copy_btn = await row.query_selector("button[title*='Copy']")
-            if copy_btn:
-                try:
-                    await copy_btn.click()
-                    await asyncio.sleep(0.5) # Jeda agar JS selesai copy
-                    raw_message_full = await self.page.evaluate("navigator.clipboard.readText()")
-                except: pass
-
-            # Ekstrak OTP dari pesan yang baru didapat
-            otp = extract_otp_from_text(raw_message_full) or otp_raw
+        for r in rows:
+            tds = r.find_all("td")
+            if len(tds) < 3: continue
+            status_span = tds[0].find("span", class_=lambda x: x and "text-[10px]" in x)
+            if not status_span or status_span.get_text(strip=True).lower() != 'success': continue
             
-            if otp and phone_raw != 'N/A':
+            phone_span = tds[0].find("span", class_=lambda x: x and "font-mono" in x)
+            phone = clean_phone_number(phone_span.get_text(strip=True) if phone_span else "N/A")
+            message_div = tds[0].find("div", class_=lambda x: x and "bg-slate-800" in x)
+            if not message_div: continue
+            
+            raw_message_full = message_div.get_text(strip=True, separator=' ')
+            otp = extract_otp_from_text(raw_message_full)
+            range_span = tds[1].find("span", class_="text-slate-200")
+            range_text = range_span.get_text(strip=True) if range_span else "N/A"
+            
+            service_match = re.search(SERVICE_KEYWORDS, raw_message_full, re.IGNORECASE)
+            service = clean_service_name(service_match.group(1)) if service_match else clean_service_name(raw_message_full)
+
+            if otp and phone != 'N/A':
                 messages.append({
-                    "otp": otp,
-                    "phone": clean_phone_number(phone_raw),
-                    "service": clean_service_name(raw_message_full),
-                    "range": country_text,
-                    "timestamp": datetime.now().strftime("%H:%M:%S"),
-                    "raw_message": raw_message_full
+                    "otp": otp, "phone": phone, "service": service,
+                    "range": range_text, "raw_message": raw_message_full
                 })
         return messages
-
+    
     async def refresh_and_screenshot(self, admin_chat_id): 
         if not self.page or not self.is_logged_in: return False
-        shot = f"shot_{int(time.time())}.png"
+        path = f"ss_{int(time.time())}.png"
         try:
             await self.page.reload(wait_until='networkidle') 
-            await self.page.screenshot(path=shot, full_page=True)
-            send_photo_tg(shot, f"📸 Refreshed at {datetime.now().strftime('%H:%M:%S')}", admin_chat_id)
+            await self.page.screenshot(path=path, full_page=True)
+            send_photo_tg(path, f"✅ Reloaded at <code>{datetime.now().strftime('%H:%M:%S')}</code>", target_chat_id=admin_chat_id)
             return True
         except: return False
         finally:
-            if os.path.exists(shot): os.remove(shot)
+            if os.path.exists(path): os.remove(path)
 
 monitor = SMSMonitor()
 
-# ================= Status & Loop (Struktur Asli Anda) =================
+# ================= Status Global =================
 start = time.time()
 total_sent = 0
-BOT_STATUS = {"status": "Init", "uptime": "--", "total_otps_sent": 0, "last_check": "Never", "cache_size": 0, "monitoring_active": False, "last_cleanup_gmt_date": "N/A"}
+BOT_STATUS = {"status": "Initializing...", "uptime": "--", "total_otps_sent": 0, "last_check": "Never", "cache_size": 0, "monitoring_active": False, "last_cleanup_gmt_date": "N/A"}
 
 def update_global_status():
     global total_sent
-    uptime_sec = time.time() - start
-    BOT_STATUS["uptime"] = f"{int(uptime_sec//3600)}h {int((uptime_sec%3600)//60)}m"
+    uptime_seconds = time.time() - start
+    BOT_STATUS["uptime"] = f"{int(uptime_seconds//3600)}h {int((uptime_seconds%3600)//60)}m"
     BOT_STATUS["total_otps_sent"] = total_sent
     BOT_STATUS["last_check"] = datetime.now().strftime("%H:%M:%S")
     BOT_STATUS["cache_size"] = len(otp_filter.cache)
@@ -422,71 +444,81 @@ def update_global_status():
 
 def check_cmd(stats):
     global LAST_ID, AWAITING_CREDENTIALS
-    if not ADMIN_ID: return
+    if ADMIN_ID is None: return
     try:
-        upd = requests.get(f"https://api.telegram.org/bot{BOT}/getUpdates?offset={LAST_ID+1}", timeout=5).json()
+        upd = requests.get(f"https://api.telegram.org/bot{BOT}/getUpdates?offset={LAST_ID+1}", timeout=15).json()
         for u in upd.get("result",[]):
             LAST_ID = u["update_id"]
             msg = u.get("message",{})
-            text, user_id, chat_id = msg.get("text",""), msg.get("from",{}).get("id"), msg.get("chat",{}).get("id")
+            text, user_id, chat_id = msg.get("text",""), msg.get("from", {}).get("id"), msg.get("chat", {}).get("id")
             if user_id != ADMIN_ID: continue
 
             if AWAITING_CREDENTIALS:
-                parts = text.split()
+                parts = text.split() if '\n' not in text else text.split('\n')
                 if len(parts) == 2:
-                    monitor._temp_username, monitor._temp_password = parts[0], parts[1]
+                    monitor._temp_username, monitor._temp_password = parts[0].strip(), parts[1].strip()
                     AWAITING_CREDENTIALS = False
                     send_tg("⏳ Logging in...", target_chat_id=chat_id)
                     asyncio.run_coroutine_threadsafe(monitor.login_and_notify(chat_id), GLOBAL_ASYNC_LOOP)
-                else: send_tg("Format: Email Password", target_chat_id=chat_id)
+                else:
+                    send_tg("⚠️ Format: Email[spasi]Password", target_chat_id=chat_id)
                 continue
 
             if text == "/status": send_tg(get_status_message(stats), target_chat_id=chat_id)
             elif text == "/refresh": asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(chat_id), GLOBAL_ASYNC_LOOP)
             elif text == "/login":
-                AWAITING_CREDENTIALS = True
-                send_tg("Kirim Email dan Password:", target_chat_id=chat_id)
-            elif text == "/startnew":
-                BOT_STATUS["monitoring_active"] = True
-                send_tg("▶️ Started", target_chat_id=chat_id)
-            elif text == "/stop":
-                BOT_STATUS["monitoring_active"] = False
-                send_tg("⏸️ Stopped", target_chat_id=chat_id)
+                if monitor.is_logged_in: send_tg("✅ Already logged in.", target_chat_id=chat_id)
+                else: AWAITING_CREDENTIALS = True; send_tg("🔑 Send Email & Password (line separated)", target_chat_id=chat_id)
+            elif text == "/startnew": BOT_STATUS["monitoring_active"] = True; send_tg("▶️ Started.", target_chat_id=chat_id)
+            elif text == "/stop": BOT_STATUS["monitoring_active"] = False; send_tg("⏸️ Stopped.", target_chat_id=chat_id)
+            elif text == "/clear-cache": 
+                otp_filter.cache = {}; otp_filter._save()
+                send_tg("🗑️ Cache cleared.", target_chat_id=chat_id)
     except: pass
 
 async def monitor_sms_loop():
     global total_sent
     async with async_playwright() as p:
         try: await monitor.initialize(p)
-        except: return
-        send_tg("✅ Bot Online. Use /login", target_chat_id=ADMIN_ID)
+        except Exception as e:
+            send_tg(f"🚨 <b>Browser Error</b>: {e}", target_chat_id=ADMIN_ID)
+            return 
+    
+        send_tg("✅ <b>BOT ZURA ACTIVE</b>\nUse <code>/login</code> then <code>/startnew</code>", target_chat_id=ADMIN_ID)
         while True:
             try:
                 await monitor.check_url_login_status() 
                 if BOT_STATUS["monitoring_active"] and monitor.is_logged_in:
                     msgs = await monitor.fetch_sms()
                     new = otp_filter.filter(msgs)
-                    for item in new:
-                        save_otp_to_json(item)
-                        send_tg(format_otp_message(item), with_inline_keyboard=True)
+                    for otp_data in new:
+                        save_otp_to_json(otp_data)
+                        message_text = format_otp_message(otp_data)
+                        send_tg(message_text, with_inline_keyboard=True, otp_code=otp_data['otp'])
                         total_sent += 1
                         await asyncio.sleep(2) 
             except: pass
             check_cmd(update_global_status())
             await asyncio.sleep(5) 
 
-# ================= Flask (Struktur Asli Anda) =================
+# ================= FLASK =================
 app = Flask(__name__)
+@app.route('/')
+def index(): return "Zura SMS Monitor API"
 @app.route('/api/status')
-def api_status(): return jsonify(update_global_status())
+def get_status_json(): return jsonify(update_global_status())
 
 def run_flask():
     app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    GLOBAL_ASYNC_LOOP = loop 
-    Thread(target=run_flask, daemon=True).start()
-    try: loop.run_until_complete(monitor_sms_loop())
-    except KeyboardInterrupt: pass
+    if not BOT or not CHAT or not ADMIN_ID:
+        print("FATAL: Check .env file.")
+    else:
+        GLOBAL_ASYNC_LOOP = asyncio.new_event_loop()
+        asyncio.set_event_loop(GLOBAL_ASYNC_LOOP)
+        Thread(target=run_flask, daemon=True).start()
+        try:
+            GLOBAL_ASYNC_LOOP.run_until_complete(monitor_sms_loop())
+        except KeyboardInterrupt:
+            print("Shutdown.")
