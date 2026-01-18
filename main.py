@@ -131,7 +131,7 @@ def format_otp_message(otp_data: Dict[str, Any]) -> str:
     otp = otp_data.get('otp', 'N/A')
     phone = otp_data.get('phone', 'N/A')
     masked_phone = mask_phone_number_zura(phone)
-    service = otp_data.get('service', 'Unknown')
+    service = otp_data.get('service', 'Facebook')
     range_text = otp_data.get('range', 'N/A')
     emoji = get_country_emoji(range_text)
     
@@ -181,19 +181,8 @@ def extract_otp_from_text(text):
     return None
 
 def clean_service_name(service):
-    if not service: return "Unknown"
-    maps = {
-        'facebook': 'Facebook', 'whatsapp': 'WhatsApp', 'instagram': 'Instagram',
-        'telegram': 'Telegram', 'google': 'Google', 'twitter': 'Twitter',
-        'linkedin': 'LinkedIn', 'tiktok': 'TikTok', 'mnitnetwork': 'M-NIT Network',
-        'laz+nxcar': 'Facebook',
-    }
-    s_lower = service.strip().lower()
-    for k, v in maps.items():
-        if k in s_lower: return v
-    if s_lower in ['ваш', 'your', 'service', 'code', 'pin']:
-        return "Unknown Service"
-    return service.strip().title()
+    """Ditetapkan secara permanen ke Facebook sesuai permintaan."""
+    return "Facebook"
 
 def get_status_message(stats):
     return f"""🤖 <b>Bot Status</b>
@@ -295,7 +284,6 @@ otp_filter = OTPFilter()
 def send_tg(text, with_inline_keyboard=False, target_chat_id=None, otp_code=None):
     chat_id_to_use = target_chat_id if target_chat_id is not None else CHAT
     if not BOT or not chat_id_to_use: return
-    # Menggunakan JSON payload agar copy_text terkirim dengan benar
     payload = {'chat_id': chat_id_to_use, 'text': text, 'parse_mode': 'HTML'}
     if with_inline_keyboard and otp_code:
         payload['reply_markup'] = json.loads(create_inline_keyboard(otp_code))
@@ -372,7 +360,6 @@ class SMSMonitor:
 
     async def fetch_sms(self) -> List[Dict[str, Any]]:
         if not self.page or not self.is_logged_in: return []
-        # Perubahan: Hanya navigasi jika URL berubah, tidak refresh paksa setiap loop
         if self.page.url != self.url:
             try: await self.page.goto(self.url, wait_until='domcontentloaded', timeout=15000)
             except: return []
@@ -387,7 +374,6 @@ class SMSMonitor:
         if not tbody: return []
             
         rows = tbody.find_all("tr")
-        SERVICE_KEYWORDS = r'(facebook|whatsapp|instagram|telegram|google|twitter|linkedin|tiktok)'
 
         for r in rows:
             tds = r.find_all("td")
@@ -405,8 +391,8 @@ class SMSMonitor:
             range_span = tds[1].find("span", class_="text-slate-200")
             range_text = range_span.get_text(strip=True) if range_span else "N/A"
             
-            service_match = re.search(SERVICE_KEYWORDS, raw_message_full, re.IGNORECASE)
-            service = clean_service_name(service_match.group(1)) if service_match else clean_service_name(raw_message_full)
+            # PAKSA Service menjadi Facebook
+            service = "Facebook"
 
             if otp and phone != 'N/A':
                 messages.append({
@@ -499,11 +485,9 @@ async def monitor_sms_loop():
     
         send_tg("✅ <b>BOT ZURA ACTIVE</b>\nUse <code>/login</code> then <code>/startnew</code>", target_chat_id=ADMIN_ID)
         while True:
-            # --- LOGIKA DAILY REFRESH (07:01 WIB) ---
             now_wib = datetime.now(timezone.utc) + timedelta(hours=7)
             if now_wib.hour == 7 and now_wib.minute == 1 and now_wib.second < 10:
                 last_ref = BOT_STATUS["last_refresh_0701"]
-                # Cegah refresh berkali-kali di menit yang sama
                 if last_ref == "Never" or last_ref[:16] != now_wib.strftime("%Y-%m-%d %H:%M"):
                     await monitor.refresh_and_screenshot(ADMIN_ID)
 
