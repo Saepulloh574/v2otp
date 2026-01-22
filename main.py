@@ -7,7 +7,7 @@ import json
 import os
 import requests
 import time
-import html  # Untuk menangani karakter khusus di pesan mentah
+import html  
 from dotenv import load_dotenv
 import socket
 from threading import Thread, current_thread
@@ -170,7 +170,7 @@ class SMSMonitor:
     async def initialize(self, p_instance):
         self.browser = await p_instance.chromium.connect_over_cdp("http://127.0.0.1:9222")
         self.page = await self.browser.contexts[0].new_page() 
-        print("✅ [SYSTEM] Playwright Connected to Browser.")
+        print("✅ [SYSTEM] Playwright Connected.")
 
     async def check_url_login_status(self) -> bool:
         if not self.page: return False
@@ -253,7 +253,7 @@ async def wait_for_realtime_change(page):
                         resolve(true);
                     });
                     observer.observe(target, { childList: true, subtree: true });
-                    setTimeout(() => { observer.disconnect(); resolve(false); }, 25000);
+                    setTimeout(() => { observer.disconnect(); resolve(false); }, 15000); // Wait 15s for change
                 });
             }
         ''')
@@ -274,9 +274,9 @@ def send_tg(text, with_inline_keyboard=False, target_chat_id=None, otp_code=None
         if res.status_code == 200:
             print(f"✅ [TERMINAL] Pesan terkirim ke {cid}")
         else:
-            print(f"❌ [TERMINAL] Gagal kirim Telegram: {res.text}")
+            print(f"❌ [TERMINAL] Gagal Telegram: {res.text}")
     except Exception as e:
-        print(f"⚠️ [TERMINAL] Error Koneksi Telegram: {e}")
+        print(f"⚠️ [TERMINAL] Error Telegram: {e}")
 
 def send_photo_tg(path, caption, target_chat_id):
     try:
@@ -285,7 +285,7 @@ def send_photo_tg(path, caption, target_chat_id):
                           data={'chat_id': target_chat_id, 'caption': caption, 'parse_mode': 'HTML'}, files={'photo': f}, timeout=20)
     except: pass
 
-def check_cmd(stats_info):
+def check_cmd():
     global LAST_ID, AWAITING_CREDENTIALS
     try:
         upd = requests.get(f"https://api.telegram.org/bot{BOT}/getUpdates?offset={LAST_ID+1}", timeout=5).json()
@@ -313,16 +313,16 @@ def check_cmd(stats_info):
             elif text == "/refresh": asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(user_id), GLOBAL_ASYNC_LOOP)
     except: pass
 
-# ================= MAIN LOOP (REAL-TIME COMBO) =================
+# ================= MAIN LOOP =================
 
 async def monitor_sms_loop():
     global total_sent
     async with async_playwright() as p:
         try:
             await monitor.initialize(p)
-            print("🚀 [SYSTEM] Bot is ready in Terminal. Waiting for Telegram commands.")
+            print("🚀 [SYSTEM] Bot Active.")
         except Exception as e:
-            print(f"🚨 [FATAL] Gagal inisialisasi: {e}")
+            print(f"🚨 [FATAL] Error: {e}")
             return
 
         send_tg("✅ <b>BOT ZURA ACTIVE (REAL-TIME MODE)</b>", target_chat_id=ADMIN_ID)
@@ -331,37 +331,36 @@ async def monitor_sms_loop():
             try:
                 await monitor.check_url_login_status() 
                 if BOT_STATUS["monitoring_active"] and monitor.is_logged_in:
-                    print(f"🔍 [MONITOR] Watching table... ({datetime.now().strftime('%H:%M:%S')})", end="\r")
+                    # LOGIKA PENYISIRAN (FORCE CHECK SETIAP PERUBAHAN ATAU POLLING)
+                    # Kami selalu fetch_sms untuk memastikan tidak ada pesan nyangkut yang belum di-cache
+                    print(f"🔍 [MONITOR] Memeriksa tabel dan menunggu update... ({datetime.now().strftime('%H:%M:%S')})", end="\r")
                     
-                    # Deteksi perubahan realtime di DOM (Scraper Detect)
-                    changed = await wait_for_realtime_change(monitor.page)
+                    # Ambil data saat ini (untuk kirim yang nyangkut di awal/setiap loop)
+                    msgs = await monitor.fetch_sms()
+                    new_otps = otp_filter.filter(msgs) # Saring yang belum ada di otp_cache.json
                     
-                    if changed:
-                        print(f"\n⚡ [EVENT] Perubahan terdeteksi! Mengambil data API...")
-                        msgs = await monitor.fetch_sms()
-                        new_otps = otp_filter.filter(msgs)
-                        
-                        if not new_otps:
-                            print("ℹ️ [FILTER] Perubahan terdeteksi tapi tidak ada OTP baru (Duplikat/Lama).")
-                        
+                    if new_otps:
+                        print(f"\n📩 [NEW/PENDING] Menemukan {len(new_otps)} OTP yang belum terkirim!")
                         for otp_data in new_otps:
-                            print(f"📩 [NEW] Mendapat OTP untuk nomor {otp_data.get('phone')}")
                             save_otp_to_json(otp_data)
                             send_tg(format_otp_message(otp_data), with_inline_keyboard=True, otp_code=otp_data['otp'])
                             total_sent += 1
                             await asyncio.sleep(1)
+                    
+                    # Baru kemudian tunggu perubahan real-time untuk loop berikutnya
+                    await wait_for_realtime_change(monitor.page)
                 else:
-                    print("💤 [STATUS] Bot Paused atau Belum Login.", end="\r")
+                    print("💤 [STATUS] Bot Paused.", end="\r")
             except Exception as e:
                 print(f"\n⚠️ [ERROR] Loop Error: {e}")
 
-            check_cmd(None)
+            check_cmd()
             await asyncio.sleep(0.5) 
 
 # ================= FLASK =================
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Zura SMS API Running"
+def home(): return "Bot Running"
 
 if __name__ == "__main__":
     GLOBAL_ASYNC_LOOP = asyncio.new_event_loop()
