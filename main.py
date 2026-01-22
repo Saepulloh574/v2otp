@@ -16,9 +16,10 @@ from typing import Dict, Any, List
 from flask import Flask, jsonify, render_template
 # --------------------
 
+# Muat variabel lingkungan
 load_dotenv()
 
-# ================= Konstanta Telegram untuk Tombol =================
+# ================= Konstanta Telegram =================
 TELEGRAM_BOT_LINK = "https://t.me/myzuraisgoodbot"
 TELEGRAM_ADMIN_LINK = "https://t.me/Imr1d"
 
@@ -29,7 +30,7 @@ try:
 except (ValueError, TypeError):
     ADMIN_ID = None
 
-# --- X.MNIT Network Configuration ---
+# --- Network Configuration ---
 LOGIN_URL = "https://x.mnitnetwork.com/mauth/login" 
 DASHBOARD_URL = "https://x.mnitnetwork.com/mdashboard/getnum" 
 
@@ -41,7 +42,7 @@ WAIT_JSON_FILE = os.path.join(OTP_SAVE_FOLDER, "wait.json")
 GLOBAL_ASYNC_LOOP = None 
 AWAITING_CREDENTIALS = False 
 
-# ================= Utils (Tetap Sama) =================
+# ================= Utils =================
 
 COUNTRY_EMOJI = {
     "NEPAL": "🇳🇵", "IVORY COAST": "🇨🇮", "GUINEA": "🇬🇳",
@@ -51,7 +52,7 @@ COUNTRY_EMOJI = {
 }
 
 def get_country_emoji(country_name: str) -> str:
-    return COUNTRY_EMOJI.get(country_name.strip().upper(), "")
+    return COUNTRY_EMOJI.get(country_name.strip().upper(), "🌍")
 
 def get_user_data(phone_number: str) -> Dict[str, Any]:
     if not os.path.exists(WAIT_JSON_FILE): return {"username": "unknown", "user_id": None}
@@ -75,12 +76,6 @@ def create_inline_keyboard(otp: str):
     }
     return json.dumps(keyboard)
 
-def clean_phone_number(phone):
-    if not phone: return "N/A"
-    cleaned = re.sub(r'[^\d+]', '', phone)
-    if cleaned and not cleaned.startswith('+') and cleaned != 'N/A': cleaned = '+' + cleaned
-    return cleaned or phone
-
 def mask_phone_number_zura(phone):
     if not phone or phone == "N/A": return phone
     digits = re.sub(r'[^\d]', '', phone)
@@ -92,6 +87,8 @@ def format_otp_message(otp_data: Dict[str, Any]) -> str:
     otp, phone = otp_data.get('otp', 'N/A'), otp_data.get('phone', 'N/A')
     user_info = get_user_data(phone)
     user_tag = f"@{user_info['username'].replace('@', '')}" if user_info['username'] != "unknown" else "unknown"
+    raw_msg = otp_data.get('raw_message', 'No message content')
+
     return (
         f"💭 <b>New Message Received</b>\n\n"
         f"<b>👤 User:</b> {user_tag}\n"
@@ -99,7 +96,8 @@ def format_otp_message(otp_data: Dict[str, Any]) -> str:
         f"<b>🌍 Country:</b> <b>{otp_data.get('range')} {get_country_emoji(otp_data.get('range', ''))}</b>\n"
         f"<b>✅ Service:</b> <b>{otp_data.get('service')}</b>\n\n"
         f"🔐 OTP: <code>{otp}</code>\n\n"
-        f"💸 <i>Greetings From ZuraStore </i> 💸"
+        f"<b>FULL MESSAGE:</b>\n"
+        f"<blockquote>{raw_msg}</blockquote>"
     )
 
 def extract_otp_from_text(text):
@@ -123,7 +121,7 @@ def save_otp_to_json(otp_data: Dict[str, Any]):
         with open(OTP_SAVE_FILE, 'w') as f: json.dump(existing, f, indent=2)
     except: pass
 
-# ================= OTP Filter Class (Tetap Sama) =================
+# ================= OTP Filter Class =================
 
 class OTPFilter:
     CLEANUP_KEY = '__LAST_CLEANUP_GMT__' 
@@ -162,7 +160,7 @@ class OTPFilter:
 
 otp_filter = OTPFilter()
 
-# ================= SMS Monitor (ROMBAKAN: AJAX INTERCEPTOR) =================
+# ================= SMS Monitor (REAL-TIME COMBO) =================
 
 class SMSMonitor:
     def __init__(self, url=DASHBOARD_URL): 
@@ -171,8 +169,8 @@ class SMSMonitor:
 
     async def initialize(self, p_instance):
         self.browser = await p_instance.chromium.connect_over_cdp("http://127.0.0.1:9222")
-        self.page = await self.browser.contexts[0].new_page() # Tetap buka tab baru
-        print("✅ Playwright page connected successfully.")
+        self.page = await self.browser.contexts[0].new_page() 
+        print("✅ Playwright: Tab Baru Dibuka & Terkoneksi.")
 
     async def check_url_login_status(self) -> bool:
         if not self.page: return False
@@ -201,15 +199,14 @@ class SMSMonitor:
         except Exception as e:
             send_tg(f"❌ Login GAGAL: <code>{str(e)[:50]}</code>", target_chat_id=admin_chat_id)
 
-    # 🎯 FUNGSI YANG DIROMBAK: MENGGUNAKAN API INTERCEPTION
     async def fetch_sms(self) -> List[Dict[str, Any]]:
         if not self.page or not self.is_logged_in: return []
         messages = []
         try:
-            # Pasang listener untuk menangkap paket JSON dari API info
-            async with self.page.expect_response(lambda r: "/getnum/info" in r.url, timeout=12000) as resp_info:
-                # Picu refresh data dengan klik header tabel (Ajax mode)
-                try: await self.page.click('th:has-text("Number Info")', timeout=2000)
+            # Mencegat respon API mentah agar Full Message didapat
+            async with self.page.expect_response(lambda r: "/getnum/info" in r.url, timeout=5000) as resp_info:
+                # Trigger internal Ajax web
+                try: await self.page.click('th:has-text("Number Info")', timeout=1000)
                 except: await self.page.reload(wait_until='domcontentloaded')
 
                 response = await resp_info.value
@@ -222,7 +219,7 @@ class SMSMonitor:
                         messages.append({
                             "otp": extract_otp_from_text(raw_msg),
                             "phone": "+" + str(item.get('number')),
-                            "service": item.get('full_number') or "Facebook", # Mengambil service asli
+                            "service": item.get('full_number') or "Facebook",
                             "range": item.get('country', 'N/A'),
                             "raw_message": raw_msg
                         })
@@ -235,8 +232,7 @@ class SMSMonitor:
         try:
             await self.page.reload(wait_until='networkidle') 
             await self.page.screenshot(path=path, full_page=True)
-            send_photo_tg(path, f"✅ Reloaded at <code>{datetime.now().strftime('%H:%M:%S')}</code>", target_chat_id=admin_chat_id)
-            BOT_STATUS["last_refresh_0701"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            send_photo_tg(path, f"✅ Live Screenshot: <code>{datetime.now().strftime('%H:%M:%S')}</code>", target_chat_id=admin_chat_id)
             return True
         except: return False
         finally:
@@ -244,10 +240,32 @@ class SMSMonitor:
 
 monitor = SMSMonitor()
 
-# ================= Global Logic (Tetap Sama) =================
+# ================= COMBO DETECTION LOGIC =================
+
+async def wait_for_realtime_change(page):
+    """Mendeteksi perubahan tampilan web secara pasif (Scraper Detect)."""
+    try:
+        await page.wait_for_selector('tbody', timeout=30000)
+        return await page.evaluate('''
+            () => {
+                return new Promise((resolve) => {
+                    const target = document.querySelector('tbody');
+                    const observer = new MutationObserver(() => {
+                        observer.disconnect();
+                        resolve(true);
+                    });
+                    observer.observe(target, { childList: true, subtree: true });
+                    // Timeout lokal 25 detik jika tidak ada perubahan
+                    setTimeout(() => { observer.disconnect(); resolve(false); }, 25000);
+                });
+            }
+        ''')
+    except: return False
+
+# ================= Telegram & Global Logic =================
 
 start, total_sent = time.time(), 0
-BOT_STATUS = {"status": "Starting", "uptime": "--", "total_otps_sent": 0, "monitoring_active": False, "last_refresh_0701": "Never"}
+BOT_STATUS = {"status": "Starting", "uptime": "--", "total_otps_sent": 0, "monitoring_active": False}
 
 def send_tg(text, with_inline_keyboard=False, target_chat_id=None, otp_code=None):
     cid = target_chat_id if target_chat_id is not None else CHAT
@@ -267,7 +285,7 @@ def send_photo_tg(path, caption, target_chat_id):
 def check_cmd():
     global LAST_ID, AWAITING_CREDENTIALS
     try:
-        upd = requests.get(f"https://api.telegram.org/bot{BOT}/getUpdates?offset={LAST_ID+1}", timeout=10).json()
+        upd = requests.get(f"https://api.telegram.org/bot{BOT}/getUpdates?offset={LAST_ID+1}", timeout=5).json()
         for u in upd.get("result", []):
             LAST_ID = u["update_id"]
             m = u.get("message", {})
@@ -284,38 +302,53 @@ def check_cmd():
 
             if text == "/status":
                 upt = str(timedelta(seconds=int(time.time() - start)))
-                msg = f"🤖 Status: <b>{BOT_STATUS['status']}</b>\nUptime: <code>{upt}</code>\nTotal Sent: <b>{total_sent}</b>"
+                msg = f"🤖 <b>Bot Zura Status</b>\n⚡ Live: {'✅' if BOT_STATUS['monitoring_active'] else '⏸️'}\nUptime: <code>{upt}</code>\nSent: <b>{total_sent}</b>"
                 send_tg(msg, target_chat_id=user_id)
-            elif text == "/login": AWAITING_CREDENTIALS = True; send_tg("🔑 Email Password (spasi):", target_chat_id=user_id)
-            elif text == "/startnew": BOT_STATUS["monitoring_active"] = True; send_tg("▶️ Monitoring ON", target_chat_id=user_id)
-            elif text == "/stop": BOT_STATUS["monitoring_active"] = False; send_tg("⏸️ Monitoring OFF", target_chat_id=user_id)
+            elif text == "/login": AWAITING_CREDENTIALS = True; send_tg("🔑 Kirim Email Password (spasi):", target_chat_id=user_id)
+            elif text == "/startnew": BOT_STATUS["monitoring_active"] = True; send_tg("▶️ Real-time Combo Started.", target_chat_id=user_id)
+            elif text == "/stop": BOT_STATUS["monitoring_active"] = False; send_tg("⏸️ Monitoring Stopped.", target_chat_id=user_id)
             elif text == "/refresh": asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(user_id), GLOBAL_ASYNC_LOOP)
     except: pass
+
+# ================= MAIN LOOP (REAL-TIME COMBO) =================
+
+[attachment_0](attachment)
 
 async def monitor_sms_loop():
     global total_sent
     async with async_playwright() as p:
         await monitor.initialize(p)
-        send_tg("✅ <b>BOT ZURA ACTIVE</b>", target_chat_id=ADMIN_ID)
+        send_tg("✅ <b>BOT ZURA ACTIVE (REAL-TIME MODE)</b>", target_chat_id=ADMIN_ID)
+        
         while True:
             try:
                 await monitor.check_url_login_status() 
+                
                 if BOT_STATUS["monitoring_active"] and monitor.is_logged_in:
-                    msgs = await monitor.fetch_sms()
-                    new = otp_filter.filter(msgs)
-                    for otp_data in new:
-                        save_otp_to_json(otp_data)
-                        send_tg(format_otp_message(otp_data), with_inline_keyboard=True, otp_code=otp_data['otp'])
-                        total_sent += 1
-                        await asyncio.sleep(2) 
-            except: pass
-            check_cmd()
-            await asyncio.sleep(10) 
+                    # 1. TUNGGU PERUBAHAN DOM (REAL-TIME)
+                    changed = await wait_for_realtime_change(monitor.page)
+                    
+                    # 2. JIKA ADA PERUBAHAN ATAU POLLING BERKALA, SIKAT API
+                    if changed:
+                        msgs = await monitor.fetch_sms()
+                        new_otps = otp_filter.filter(msgs)
+                        for otp_data in new_otps:
+                            save_otp_to_json(otp_data)
+                            send_tg(format_otp_message(otp_data), with_inline_keyboard=True, otp_code=otp_data['otp'])
+                            total_sent += 1
+                            await asyncio.sleep(1) # Jeda antar kirim singkat
+                
+            except Exception as e:
+                print(f"⚠️ Loop Error: {e}")
+                await asyncio.sleep(5)
 
-# ================= FLASK & MAIN =================
+            check_cmd()
+            await asyncio.sleep(0.5) 
+
+# ================= FLASK =================
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Zura SMS Monitor API"
+def home(): return "Zura Real-Time Monitor API"
 
 if __name__ == "__main__":
     GLOBAL_ASYNC_LOOP = asyncio.new_event_loop()
