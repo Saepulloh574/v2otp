@@ -8,34 +8,42 @@ import os
 import requests
 import time
 from dotenv import load_dotenv
-from threading import Thread
+import socket
+from threading import Thread, current_thread
 from typing import Dict, Any, List
-from flask import Flask, jsonify
 
-# Muat variabel lingkungan
+# --- Import Flask ---
+from flask import Flask, jsonify, render_template
+# --------------------
+
+# Muat variabel lingkungan dari file .env
 load_dotenv()
 
-# ================= Konstanta Telegram =================
+# ================= Konstanta Telegram untuk Tombol =================
 TELEGRAM_BOT_LINK = "https://t.me/myzuraisgoodbot"
 TELEGRAM_ADMIN_LINK = "https://t.me/Imr1d"
 
+# ================= Telegram Configuration (Loaded from .env) =================
 BOT = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT = os.getenv("TELEGRAM_CHAT_ID")
 try:
     ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID"))
 except (ValueError, TypeError):
+    print("⚠️ WARNING: TELEGRAM_ADMIN_ID tidak valid. Perintah admin dinonaktifkan.")
     ADMIN_ID = None
 
 # --- X.MNIT Network Configuration ---
 LOGIN_URL = "https://x.mnitnetwork.com/mauth/login" 
 DASHBOARD_URL = "https://x.mnitnetwork.com/mdashboard/getnum" 
-API_INFO_URL = "https://x.mnitnetwork.com/mapi/v1/mdashboard/getnum/info"
 
 LAST_ID = 0
+
+# ================= Konfigurasi File Path =================
 OTP_SAVE_FOLDER = os.path.join("..", "get")
 OTP_SAVE_FILE = os.path.join(OTP_SAVE_FOLDER, "smc.json")
-WAIT_JSON_FILE = os.path.join(OTP_SAVE_FOLDER, "wait.json")
+WAIT_JSON_FILE = os.path.join(OTP_SAVE_FOLDER, "wait.json") 
 
+# ================= Global State for Asyncio Loop & Command =================
 GLOBAL_ASYNC_LOOP = None 
 AWAITING_CREDENTIALS = False 
 
@@ -43,10 +51,10 @@ AWAITING_CREDENTIALS = False
 
 COUNTRY_EMOJI = {
     "NEPAL": "🇳🇵", "IVORY COAST": "🇨🇮", "GUINEA": "🇬🇳",
-    "CENTRAL AFRIKA": "🇨🇫", "CENTRAL AFRICAN REPUBLIC": "🇨🇫", 
+    "CENTRAL AFRIKA": "🇨🇫", "CENTRAL AFRICAN REPUBLIC": "🇨🇫",
     "TOGO": "🇹🇬", "TAJIKISTAN": "🇹🇯", "BENIN": "🇧🇯",
     "SIERRA LEONE": "🇸🇱", "MADAGASCAR": "🇲🇬", "AFGANISTAN": "🇦🇫",
-    "LEBANON": "🇱🇧", "QATAR": "🇶🇦", "INDONESIA": "🇮🇩"
+    "ZURA STORE": "🇮🇩", "LEBANON": "🇱🇧", "QATAR": "🇶🇦", "INDONESIA": "🇮🇩"
 }
 
 def get_country_emoji(country_name: str) -> str:
@@ -69,17 +77,52 @@ def get_user_data(phone_number: str) -> Dict[str, Any]:
 def create_inline_keyboard(otp: str):
     keyboard = {
         "inline_keyboard": [
-            [{"text": f"📋 Copy OTP: {otp}", "copy_text": {"text": otp}}, {"text": "🎭 Owner", "url": TELEGRAM_ADMIN_LINK}],
+            [{"text": f"{otp}", "copy_text": {"text": otp}}, {"text": "🎭 Owner", "url": TELEGRAM_ADMIN_LINK}],
             [{"text": "📞 Get Number", "url": TELEGRAM_BOT_LINK}]
         ]
     }
     return json.dumps(keyboard)
 
+def clean_phone_number(phone):
+    if not phone: return "N/A"
+    cleaned = re.sub(r'[^\d+]', '', phone)
+    if cleaned and not cleaned.startswith('+') and cleaned != 'N/A':
+        cleaned = '+' + cleaned
+    return cleaned or phone
+
+def mask_phone_number_zura(phone):
+    if not phone or phone == "N/A": return phone
+    digits = re.sub(r'[^\d]', '', phone)
+    if len(digits) < 7: return phone
+    prefix = "+" if phone.startswith('+') else ""
+    return f"{prefix}{digits[:5]}***{digits[-4:]}"
+
+def format_otp_message(otp_data: Dict[str, Any]) -> str:
+    otp = otp_data.get('otp', 'N/A')
+    phone = otp_data.get('phone', 'N/A')
+    masked_phone = mask_phone_number_zura(phone)
+    service = otp_data.get('service', 'Facebook')
+    range_text = otp_data.get('range', 'N/A')
+    emoji = get_country_emoji(range_text)
+    user_info = get_user_data(phone)
+    user_tag = f"@{user_info['username'].replace('@', '')}" if user_info['username'] != "unknown" else "unknown"
+    
+    return (
+        f"💭 <b>New Message Received</b>\n\n"
+        f"<b>👤 User:</b> {user_tag}\n"
+        f"<b>📱 Number:</b> <code>{masked_phone}</code>\n"
+        f"<b>🌍 Country:</b> <b>{range_text} {emoji}</b>\n"
+        f"<b>✅ Service:</b> <b>{service}</b>\n\n"
+        f"🔐 OTP: <code>{otp}</code>\n\n"
+        f"💸 <i>Greetings From ZuraStore </i> 💸"
+    )
+
 def extract_otp_from_text(text):
     if not text: return None
     patterns = [ 
-        r'code[:\s]*([\d\s-]+)', r'verification[:\s]*([\d\s-]+)', 
-        r'otp[:\s]*([\d\s-]+)', r'\b(\d{4,8})\b'
+        r'<#>\s*([\d\s-]+)\s*—', r'code[:\s]*([\d\s-]+)',  
+        r'verification[:\s]*([\d\s-]+)', r'otp[:\s]*([\d\s-]+)',   
+        r'\b(\d{4,8})\b', 
     ]
     for p in patterns:
         m = re.search(p, text, re.I)
@@ -87,26 +130,6 @@ def extract_otp_from_text(text):
             matched = re.sub(r'[^\d]', '', m.group(1) if m.groups() else m.group(0))
             if matched: return matched
     return None
-
-def format_otp_message(otp_data: Dict[str, Any]) -> str:
-    phone = otp_data.get('phone', 'N/A')
-    # Masking format: +9617***7299
-    digits = re.sub(r'[^\d]', '', phone)
-    masked_phone = f"+{digits[:5]}***{digits[-4:]}" if len(digits) > 8 else phone
-    
-    user_info = get_user_data(phone)
-    user_tag = f"@{user_info['username'].replace('@', '')}" if user_info['username'] != "unknown" else "unknown"
-    emoji = get_country_emoji(otp_data.get('range', ''))
-
-    return (
-        f"💭 <b>New Message Received</b>\n\n"
-        f"<b>👤 User:</b> {user_tag}\n"
-        f"<b>📱 Number:</b> <code>{masked_phone}</code>\n"
-        f"<b>🌍 Country:</b> <b>{otp_data.get('range')} {emoji}</b>\n"
-        f"<b>✅ Service:</b> <b>{otp_data.get('service')}</b>\n\n"
-        f"🔐 OTP: <code>{otp_data.get('otp')}</code>\n\n"
-        f"💸 <i>Greetings From ZuraStore </i> 💸"
-    )
 
 def save_otp_to_json(otp_data: Dict[str, Any]):
     if not os.path.exists(OTP_SAVE_FOLDER): os.makedirs(OTP_SAVE_FOLDER)
@@ -119,7 +142,7 @@ def save_otp_to_json(otp_data: Dict[str, Any]):
         with open(OTP_SAVE_FILE, 'w') as f: json.dump(existing, f, indent=2)
     except: pass
 
-# ================= OTP Filter & Cache =================
+# ================= OTP Filter Class =================
 
 class OTPFilter:
     CLEANUP_KEY = '__LAST_CLEANUP_GMT__' 
@@ -147,7 +170,6 @@ class OTPFilter:
             self._save()
         
     def filter(self, lst: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        self._cleanup()
         out = []
         for d in lst:
             key = f"{d.get('otp')}_{d.get('phone')}"
@@ -159,10 +181,11 @@ class OTPFilter:
 
 otp_filter = OTPFilter()
 
-# ================= SMS Monitor (AJAX Interceptor) =================
+# ================= SMS Monitor (Interceptor Version) =================
 
 class SMSMonitor:
-    def __init__(self):
+    def __init__(self, url=DASHBOARD_URL): 
+        self.url = url
         self.browser = None
         self.page = None
         self.is_logged_in = False 
@@ -171,42 +194,52 @@ class SMSMonitor:
 
     async def initialize(self, p_instance):
         self.browser = await p_instance.chromium.connect_over_cdp("http://127.0.0.1:9222")
-        self.page = self.browser.contexts[0].pages[0] if self.browser.contexts[0].pages else await self.browser.contexts[0].new_page()
+        # MEMBUKA TAB BARU SESUAI PERMINTAAN
+        self.page = await self.browser.contexts[0].new_page()
+        print("🚀 Playwright: New Tab Opened & Connected.")
+
+    async def check_url_login_status(self) -> bool:
+        if not self.page: return False
+        try: return "mdashboard" in self.page.url
+        except: return False
 
     async def login(self):
-        if not self.page: return False
-        await self.page.goto(LOGIN_URL) 
-        await self.page.fill('input[type="email"]', self._temp_username)
-        await self.page.fill('input[type="password"]', self._temp_password)
-        await self.page.click('button[type="submit"]')
-        await self.page.wait_for_url(re.compile(r".*/mdashboard.*"), timeout=20000)
-        self.is_logged_in = True
-        return True
+        if not self.page: raise Exception("Page not initialized.")
+        await self.page.goto(LOGIN_URL, wait_until='load', timeout=15000) 
+        await self.page.type('input[type="email"]', self._temp_username) 
+        await self.page.type('input[type="password"]', self._temp_password)
+        await self.page.click('button[type="submit"]') 
+        try:
+            await self.page.wait_for_url(re.compile(r".*/mdashboard.*"), timeout=30000) 
+            self.is_logged_in = True
+            return True
+        except: return False
 
-    async def fetch_sms_ajax(self) -> List[Dict[str, Any]]:
-        """Memicu Ajax Refresh via klik Header Tabel & Mencegat JSON."""
+    async def login_and_notify(self, admin_chat_id):
+        try:
+            if await self.login():
+                await self.refresh_and_screenshot(admin_chat_id)
+                send_tg(f"✅ Login berhasil! Gunakan: <code>/startnew</code>", target_chat_id=admin_chat_id)
+        except Exception as e:
+            send_tg(f"❌ Login GAGAL: <code>{str(e)[:50]}</code>", target_chat_id=admin_chat_id)
+
+    # 🎯 PERBAIKAN UTAMA: MENGGUNAKAN INTERCEPTOR UNTUK FULL MESSAGE
+    async def fetch_sms(self) -> List[Dict[str, Any]]:
         if not self.page or not self.is_logged_in: return []
         
-        # Pastikan di Dashboard
-        if "/mdashboard" not in self.page.url:
-            await self.page.goto(DASHBOARD_URL)
-            await self.page.wait_for_selector('thead', timeout=10000)
-
         messages = []
         try:
-            # 1. Pasang Listener untuk API
+            # Mencegat response JSON dari API internal web
             async with self.page.expect_response(lambda r: "/getnum/info" in r.url, timeout=12000) as resp_info:
-                # 2. Klik Header "Number Info" untuk pemicu Ajax (berdasarkan kode JS web)
+                # Memicu AJAX update dengan klik header tabel (cara halus)
                 try:
-                    await self.page.click('th:has-text("Number Info")', timeout=3000)
+                    await self.page.click('th:has-text("Number Info")', timeout=2000)
                 except:
-                    # Fallback: jika klik gagal, lakukan reload ringan
                     await self.page.reload(wait_until='domcontentloaded')
-                
+
                 response = await resp_info.value
                 json_data = await response.json()
                 
-                # 3. Parsing Data JSON Sesuai Struktur Temuan
                 numbers = json_data.get('data', {}).get('numbers', [])
                 for item in numbers:
                     if item.get('status') == 'success' and item.get('message'):
@@ -214,103 +247,99 @@ class SMSMonitor:
                         messages.append({
                             "otp": extract_otp_from_text(raw_msg),
                             "phone": "+" + str(item.get('number')),
-                            "service": item.get('full_number') or "Facebook", # full_number = service
+                            "service": item.get('full_number') or "Facebook", # full_number = Nama Service
                             "range": item.get('country', 'N/A'),
                             "raw_message": raw_msg
                         })
-        except Exception as e:
-            print(f"📡 Ajax Intercept Timeout: {e}")
-            
+        except: pass
         return messages
-
-    async def refresh_and_screenshot(self, admin_chat_id):
+    
+    async def refresh_and_screenshot(self, admin_chat_id): 
+        if not self.page: return False
         path = f"ss_{int(time.time())}.png"
-        await self.page.reload(wait_until='networkidle')
-        await self.page.screenshot(path=path)
-        send_photo_tg(path, f"📸 Dashboard Update\nTime: {datetime.now().strftime('%H:%M:%S')}", admin_chat_id)
-        if os.path.exists(path): os.remove(path)
+        try:
+            await self.page.reload(wait_until='networkidle') 
+            await self.page.screenshot(path=path)
+            send_photo_tg(path, f"✅ Updated: <code>{datetime.now().strftime('%H:%M:%S')}</code>", target_chat_id=admin_chat_id)
+            BOT_STATUS["last_refresh_0701"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            return True
+        except: return False
+        finally:
+            if os.path.exists(path): os.remove(path)
 
 monitor = SMSMonitor()
 
-# ================= Global Logic & Bot Commands =================
+# ================= Telegram & Loop Logic =================
 
-BOT_STATUS = {"status": "Starting", "total_sent": 0, "monitoring_active": False}
-start_time = time.time()
+total_sent = 0
+BOT_STATUS = {"status": "Starting", "uptime": "--", "total_otps_sent": 0, "monitoring_active": False, "last_refresh_0701": "Never"}
+start_time_app = time.time()
 
 def send_tg(text, with_inline_keyboard=False, target_chat_id=None, otp_code=None):
-    cid = target_chat_id or CHAT
+    cid = target_chat_id if target_chat_id is not None else CHAT
+    if not BOT or not cid: return
     payload = {'chat_id': cid, 'text': text, 'parse_mode': 'HTML'}
-    if with_inline_keyboard and otp_code: payload['reply_markup'] = create_inline_keyboard(otp_code)
-    try: requests.post(f"https://api.telegram.org/bot{BOT}/sendMessage", json=payload)
+    if with_inline_keyboard and otp_code:
+        payload['reply_markup'] = create_inline_keyboard(otp_code)
+    try: requests.post(f"https://api.telegram.org/bot{BOT}/sendMessage", json=payload, timeout=15)
     except: pass
 
 def send_photo_tg(path, caption, target_chat_id):
     try:
         with open(path, 'rb') as f:
             requests.post(f"https://api.telegram.org/bot{BOT}/sendPhoto", 
-                          data={'chat_id': target_chat_id, 'caption': caption, 'parse_mode': 'HTML'}, files={'photo': f})
+                          data={'chat_id': target_chat_id, 'caption': caption, 'parse_mode': 'HTML'}, files={'photo': f}, timeout=20)
     except: pass
 
 def check_cmd():
     global LAST_ID, AWAITING_CREDENTIALS
     try:
-        r = requests.get(f"https://api.telegram.org/bot{BOT}/getUpdates?offset={LAST_ID+1}", timeout=5).json()
+        r = requests.get(f"https://api.telegram.org/bot{BOT}/getUpdates?offset={LAST_ID+1}", timeout=10).json()
         for u in r.get("result", []):
             LAST_ID = u["update_id"]
             m = u.get("message", {})
-            txt = m.get("text", "")
-            uid = m.get("from", {}).get("id")
+            txt, uid = m.get("text", ""), m.get("from", {}).get("id")
             if uid != ADMIN_ID: continue
 
             if AWAITING_CREDENTIALS:
                 parts = txt.split()
-                if len(parts) >= 2:
+                if len(parts) == 2:
                     monitor._temp_username, monitor._temp_password = parts[0], parts[1]
                     AWAITING_CREDENTIALS = False
-                    send_tg("⏳ Logging in...", target_chat_id=uid)
-                    asyncio.run_coroutine_threadsafe(monitor.login(), GLOBAL_ASYNC_LOOP)
+                    asyncio.run_coroutine_threadsafe(monitor.login_and_notify(uid), GLOBAL_ASYNC_LOOP)
                 continue
 
             if txt == "/status":
-                uptime = str(timedelta(seconds=int(time.time() - start_time)))
-                status_msg = f"🤖 <b>Bot Status</b>\n\n⚡ Monitoring: {'✅ ON' if BOT_STATUS['monitoring_active'] else '⏸️ OFF'}\n🌐 Login: {'✅' if monitor.is_logged_in else '❌'}\n⏱️ Uptime: <code>{uptime}</code>\n📨 Total Sent: <b>{BOT_STATUS['total_sent']}</b>"
-                send_tg(status_msg, target_chat_id=uid)
-            elif txt == "/login":
-                AWAITING_CREDENTIALS = True
-                send_tg("🔑 Kirim Email & Password dipisah spasi:", target_chat_id=uid)
-            elif txt == "/startnew":
-                BOT_STATUS["monitoring_active"] = True
-                send_tg("▶️ Monitoring Started (AJAX Mode)", target_chat_id=uid)
-            elif txt == "/stop":
-                BOT_STATUS["monitoring_active"] = False
-                send_tg("⏸️ Monitoring Paused", target_chat_id=uid)
-            elif txt == "/refresh":
-                asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(uid), GLOBAL_ASYNC_LOOP)
+                uptime = str(timedelta(seconds=int(time.time() - start_time_app)))
+                msg = f"🤖 <b>Status</b>\nMonitoring: {'✅' if BOT_STATUS['monitoring_active'] else '⏸️'}\nUptime: <code>{uptime}</code>\nSent: <b>{total_sent}</b>"
+                send_tg(msg, target_chat_id=uid)
+            elif txt == "/login": AWAITING_CREDENTIALS = True; send_tg("🔑 Kirim Email Password (spasi):", target_chat_id=uid)
+            elif txt == "/startnew": BOT_STATUS["monitoring_active"] = True; send_tg("▶️ Monitoring ON", target_chat_id=uid)
+            elif txt == "/stop": BOT_STATUS["monitoring_active"] = False; send_tg("⏸️ Monitoring OFF", target_chat_id=uid)
+            elif txt == "/refresh": asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(uid), GLOBAL_ASYNC_LOOP)
     except: pass
 
 async def monitor_sms_loop():
+    global total_sent
     async with async_playwright() as p:
         await monitor.initialize(p)
-        send_tg("✅ <b>BOT ZURA ACTIVE</b>\nUse <code>/login</code> then <code>/startnew</code>", target_chat_id=ADMIN_ID)
-        
+        send_tg("✅ <b>BOT ZURA ACTIVE</b>", target_chat_id=ADMIN_ID)
         while True:
             try:
+                await monitor.check_url_login_status()
                 if BOT_STATUS["monitoring_active"] and monitor.is_logged_in:
-                    # Mengambil data via AJAX (Interceptor)
-                    all_msgs = await monitor.fetch_sms_ajax()
-                    new_msgs = otp_filter.filter(all_msgs)
-                    
-                    for data in new_msgs:
+                    all_msgs = await monitor.fetch_sms()
+                    new = otp_filter.filter(all_msgs)
+                    for data in new:
                         save_otp_to_json(data)
                         send_tg(format_otp_message(data), with_inline_keyboard=True, otp_code=data['otp'])
-                        BOT_STATUS["total_sent"] += 1
-                        await asyncio.sleep(1)
+                        total_sent += 1
+                        await asyncio.sleep(2)
             except: pass
-            
             check_cmd()
-            await asyncio.sleep(12) # Jeda antar Ajax Refresh
+            await asyncio.sleep(10)
 
-# ================= FLASK & MAIN =================
+# ================= FLASK =================
 app = Flask(__name__)
 @app.route('/')
 def home(): return "Zura SMS Monitor Running"
