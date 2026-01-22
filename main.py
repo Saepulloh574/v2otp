@@ -160,7 +160,7 @@ class OTPFilter:
 
 otp_filter = OTPFilter()
 
-# ================= SMS Monitor (REAL-TIME COMBO) =================
+# ================= SMS Monitor Class =================
 
 class SMSMonitor:
     def __init__(self, url=DASHBOARD_URL): 
@@ -170,7 +170,7 @@ class SMSMonitor:
     async def initialize(self, p_instance):
         self.browser = await p_instance.chromium.connect_over_cdp("http://127.0.0.1:9222")
         self.page = await self.browser.contexts[0].new_page() 
-        print("✅ Playwright: Tab Baru Dibuka & Terkoneksi.")
+        print("✅ Playwright Connected.")
 
     async def check_url_login_status(self) -> bool:
         if not self.page: return False
@@ -195,7 +195,7 @@ class SMSMonitor:
         try:
             if await self.login():
                 await self.refresh_and_screenshot(admin_chat_id)
-                send_tg(f"✅ Login berhasil! Mulai: <code>/startnew</code>", target_chat_id=admin_chat_id)
+                send_tg(f"✅ Login berhasil! Gunakan: <code>/startnew</code>", target_chat_id=admin_chat_id)
         except Exception as e:
             send_tg(f"❌ Login GAGAL: <code>{str(e)[:50]}</code>", target_chat_id=admin_chat_id)
 
@@ -203,9 +203,7 @@ class SMSMonitor:
         if not self.page or not self.is_logged_in: return []
         messages = []
         try:
-            # Mencegat respon API mentah agar Full Message didapat
             async with self.page.expect_response(lambda r: "/getnum/info" in r.url, timeout=5000) as resp_info:
-                # Trigger internal Ajax web
                 try: await self.page.click('th:has-text("Number Info")', timeout=1000)
                 except: await self.page.reload(wait_until='domcontentloaded')
 
@@ -240,29 +238,28 @@ class SMSMonitor:
 
 monitor = SMSMonitor()
 
-# ================= COMBO DETECTION LOGIC =================
+# ================= Real-time Detection Logic =================
 
 async def wait_for_realtime_change(page):
-    """Mendeteksi perubahan tampilan web secara pasif (Scraper Detect)."""
     try:
         await page.wait_for_selector('tbody', timeout=30000)
         return await page.evaluate('''
             () => {
                 return new Promise((resolve) => {
                     const target = document.querySelector('tbody');
+                    if (!target) { resolve(false); return; }
                     const observer = new MutationObserver(() => {
                         observer.disconnect();
                         resolve(true);
                     });
                     observer.observe(target, { childList: true, subtree: true });
-                    // Timeout lokal 25 detik jika tidak ada perubahan
                     setTimeout(() => { observer.disconnect(); resolve(false); }, 25000);
                 });
             }
         ''')
     except: return False
 
-# ================= Telegram & Global Logic =================
+# ================= Telegram Logic =================
 
 start, total_sent = time.time(), 0
 BOT_STATUS = {"status": "Starting", "uptime": "--", "total_otps_sent": 0, "monitoring_active": False}
@@ -302,33 +299,30 @@ def check_cmd():
 
             if text == "/status":
                 upt = str(timedelta(seconds=int(time.time() - start)))
-                msg = f"🤖 <b>Bot Zura Status</b>\n⚡ Live: {'✅' if BOT_STATUS['monitoring_active'] else '⏸️'}\nUptime: <code>{upt}</code>\nSent: <b>{total_sent}</b>"
+                msg = f"🤖 <b>Bot Zura Status</b>\n⚡ Monitoring: {'✅' if BOT_STATUS['monitoring_active'] else '⏸️'}\nUptime: <code>{upt}</code>\nTotal Sent: <b>{total_sent}</b>"
                 send_tg(msg, target_chat_id=user_id)
             elif text == "/login": AWAITING_CREDENTIALS = True; send_tg("🔑 Kirim Email Password (spasi):", target_chat_id=user_id)
-            elif text == "/startnew": BOT_STATUS["monitoring_active"] = True; send_tg("▶️ Real-time Combo Started.", target_chat_id=user_id)
+            elif text == "/startnew": BOT_STATUS["monitoring_active"] = True; send_tg("▶️ Real-time Mode Started.", target_chat_id=user_id)
             elif text == "/stop": BOT_STATUS["monitoring_active"] = False; send_tg("⏸️ Monitoring Stopped.", target_chat_id=user_id)
             elif text == "/refresh": asyncio.run_coroutine_threadsafe(monitor.refresh_and_screenshot(user_id), GLOBAL_ASYNC_LOOP)
     except: pass
 
-# ================= MAIN LOOP (REAL-TIME COMBO) =================
-
-[attachment_0](attachment)
+# ================= MAIN LOOP =================
 
 async def monitor_sms_loop():
     global total_sent
     async with async_playwright() as p:
         await monitor.initialize(p)
-        send_tg("✅ <b>BOT ZURA ACTIVE (REAL-TIME MODE)</b>", target_chat_id=ADMIN_ID)
+        send_tg("✅ <b>BOT ZURA ACTIVE</b>", target_chat_id=ADMIN_ID)
         
         while True:
             try:
                 await monitor.check_url_login_status() 
-                
                 if BOT_STATUS["monitoring_active"] and monitor.is_logged_in:
-                    # 1. TUNGGU PERUBAHAN DOM (REAL-TIME)
+                    # Deteksi perubahan di web (Combo Scraper)
                     changed = await wait_for_realtime_change(monitor.page)
                     
-                    # 2. JIKA ADA PERUBAHAN ATAU POLLING BERKALA, SIKAT API
+                    # Ambil data API jika terdeteksi perubahan
                     if changed:
                         msgs = await monitor.fetch_sms()
                         new_otps = otp_filter.filter(msgs)
@@ -336,10 +330,9 @@ async def monitor_sms_loop():
                             save_otp_to_json(otp_data)
                             send_tg(format_otp_message(otp_data), with_inline_keyboard=True, otp_code=otp_data['otp'])
                             total_sent += 1
-                            await asyncio.sleep(1) # Jeda antar kirim singkat
-                
+                            await asyncio.sleep(1)
             except Exception as e:
-                print(f"⚠️ Loop Error: {e}")
+                print(f"⚠️ Error: {e}")
                 await asyncio.sleep(5)
 
             check_cmd()
@@ -348,7 +341,7 @@ async def monitor_sms_loop():
 # ================= FLASK =================
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Zura Real-Time Monitor API"
+def home(): return "Bot Running"
 
 if __name__ == "__main__":
     GLOBAL_ASYNC_LOOP = asyncio.new_event_loop()
