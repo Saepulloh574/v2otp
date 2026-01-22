@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 import socket
 from threading import Thread, current_thread
 from typing import Dict, Any, List
+import html
 
 # --- Import Flask ---
 from flask import Flask, jsonify, render_template
@@ -87,7 +88,8 @@ def format_otp_message(otp_data: Dict[str, Any]) -> str:
     otp, phone = otp_data.get('otp', 'N/A'), otp_data.get('phone', 'N/A')
     user_info = get_user_data(phone)
     user_tag = f"@{user_info['username'].replace('@', '')}" if user_info['username'] != "unknown" else "unknown"
-    raw_msg = otp_data.get('raw_message', 'No message content')
+    # Menggunakan html.escape agar karakter mentah seperti <#> tidak merusak parse_mode HTML Telegram
+    raw_msg = html.escape(otp_data.get('raw_message', 'No message content'))
 
     return (
         f"💭 <b>New Message Received</b>\n\n"
@@ -269,7 +271,10 @@ def send_tg(text, with_inline_keyboard=False, target_chat_id=None, otp_code=None
     if not BOT or not cid: return
     payload = {'chat_id': cid, 'text': text, 'parse_mode': 'HTML'}
     if with_inline_keyboard and otp_code: payload['reply_markup'] = create_inline_keyboard(otp_code)
-    try: requests.post(f"https://api.telegram.org/bot{BOT}/sendMessage", json=payload, timeout=15)
+    try: 
+        r = requests.post(f"https://api.telegram.org/bot{BOT}/sendMessage", json=payload, timeout=15)
+        if r.status_code != 200:
+            print(f"❌ Telegram Error: {r.text}")
     except: pass
 
 def send_photo_tg(path, caption, target_chat_id):
