@@ -102,10 +102,19 @@ def format_otp_message(otp_data: Dict[str, Any]) -> str:
 
 def extract_otp_from_text(text):
     if not text: return None
-    patterns = [r'<#>\s*([\d\s-]+)\s*—', r'code[:\s]*([\d\s-]+)', r'otp[:\s]*([\d\s-]+)', r'\b(\d{4,8})\b']
+    # Pattern 1: Mencari format 123-456 atau 123 456 (Biasanya WhatsApp)
+    # Pattern 2: Mencari kata kunci "kode" atau "otp" diikuti angka
+    # Pattern 3: Mencari angka berurutan 4-8 digit
+    patterns = [
+        r'(\d{3}[\s-]\d{3})',  # Menangkap format WhatsApp 123-456
+        r'(?:code|otp|kode)[:\s]*([\d\s-]+)', 
+        r'\b(\d{4,8})\b'
+    ]
+    
     for p in patterns:
         m = re.search(p, text, re.I)
         if m:
+            # Hilangkan semua karakter non-digit agar menjadi angka polos (913946)
             otp = re.sub(r'[^\d]', '', m.group(1) if m.groups() else m.group(0))
             if otp: return otp
     return None
@@ -332,10 +341,9 @@ async def monitor_sms_loop():
                 await monitor.check_url_login_status() 
                 if BOT_STATUS["monitoring_active"] and monitor.is_logged_in:
                     # LOGIKA PENYISIRAN (FORCE CHECK SETIAP PERUBAHAN ATAU POLLING)
-                    # Kami selalu fetch_sms untuk memastikan tidak ada pesan nyangkut yang belum di-cache
                     print(f"🔍 [MONITOR] Memeriksa tabel dan menunggu update... ({datetime.now().strftime('%H:%M:%S')})", end="\r")
                     
-                    # Ambil data saat ini (untuk kirim yang nyangkut di awal/setiap loop)
+                    # Ambil data saat ini
                     msgs = await monitor.fetch_sms()
                     new_otps = otp_filter.filter(msgs) # Saring yang belum ada di otp_cache.json
                     
@@ -347,7 +355,7 @@ async def monitor_sms_loop():
                             total_sent += 1
                             await asyncio.sleep(1)
                     
-                    # Baru kemudian tunggu perubahan real-time untuk loop berikutnya
+                    # Tunggu perubahan real-time
                     await wait_for_realtime_change(monitor.page)
                 else:
                     print("💤 [STATUS] Bot Paused.", end="\r")
