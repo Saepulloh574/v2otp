@@ -155,8 +155,20 @@ def extract_otp_from_text(text):
     return None
 
 def save_otp_to_json(otp_data: Dict[str, Any]):
+    """
+    Menyimpan data OTP ke file JSON dengan format yang diminta:
+    service, number, otp, dan full message.
+    """
     if not os.path.exists(OTP_SAVE_FOLDER): os.makedirs(OTP_SAVE_FOLDER)
-    data = {"Number": otp_data.get('phone'), "OTP": otp_data.get('otp'), "FullMessage": otp_data.get('raw_message')}
+    
+    # Format data sesuai request
+    data = {
+        "service": otp_data.get('service', 'Unknown'),
+        "number": otp_data.get('phone', 'N/A'),
+        "otp": otp_data.get('otp', 'N/A'),
+        "full_message": otp_data.get('raw_message', '')
+    }
+    
     try:
         existing = []
         if os.path.exists(OTP_SAVE_FILE) and os.stat(OTP_SAVE_FILE).st_size > 0:
