@@ -31,8 +31,8 @@ except (ValueError, TypeError):
     ADMIN_ID = None
 
 # --- Network Configuration ---
-LOGIN_URL = "https://x.mnitnetwork.com/mauth/login" 
-DASHBOARD_URL = "https://x.mnitnetwork.com/mdashboard/getnum" 
+LOGIN_URL = "https://stexsms.com/mauth/login" 
+DASHBOARD_URL = "https://stexsms.com/mdashboard/getnum" 
 
 LAST_ID = 0
 OTP_SAVE_FOLDER = os.path.join("..", "get")
@@ -87,7 +87,7 @@ COUNTRY_EMOJI = {
 }
 
 def get_country_emoji(country_name: str) -> str:
-    return COUNTRY_EMOJI.get(country_name.strip().upper(), "🌍")
+    return COUNTRY_EMOJI.get(country_name.strip().upper(), "🏴‍☠️")
 
 def get_user_data(phone_number: str) -> Dict[str, Any]:
     if not os.path.exists(WAIT_JSON_FILE): return {"username": "unknown", "user_id": None}
